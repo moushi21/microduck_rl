@@ -22,7 +22,7 @@ from copy import deepcopy
 NUM_STEPS_PER_ENV = 24
 
 # Fraction of envs commanded to spin on the spot (lin=0, |ang| ∈ [0.4·max, max]).
-TURN_IN_PLACE_FRACTION = 0.15
+TURN_IN_PLACE_FRACTION = 0.0
 
 # Symmetry
 ENABLE_SYMMETRY = False
@@ -861,9 +861,9 @@ def make_microduck_run_env_cfg(
                     # BACKWARD balance untrainable. Regression timeline matched the
                     # ramp increases: 0.015 → 0.02 → 0.03 as policies got worse.
                     {"step": 0,          "range": 0.003},
-                    {"step": 500 * 24,  "range": 0.005},
-                    {"step": 1000 * 24,  "range": 0.01},
-                    {"step": 1500 * 24,  "range": 0.015},
+                    {"step": 500 * 24,  "range": 0.003},
+                    {"step": 1000 * 24,  "range": 0.003},
+                    {"step": 1500 * 24,  "range": 0.003},
                 ],
             },
         )
@@ -878,8 +878,8 @@ def make_microduck_run_env_cfg(
                     # Capped at ±10 mm (2026-07 audit — same over-conservatism
                     # concern as trunk CoM; head is a large lever arm).
                     {"step": 0,          "range": 0.003},
-                    {"step": 500 * 24,  "range": 0.005},
-                    {"step": 1000 * 24,  "range": 0.01},
+                    {"step": 500 * 24,  "range": 0.003},
+                    {"step": 1000 * 24,  "range": 0.003},
                 ],
             },
         )
