@@ -27,6 +27,10 @@ from .microduck_velocity_env_cfg import (
     make_microduck_velocity_env_cfg,
     MicroduckRlCfg,
 )
+from .microduck_run_env_cfg import (
+    make_microduck_run_env_cfg,
+    MicroduckRunRlCfg,
+)
 from .microduck_standup_env_cfg import (
     make_microduck_standup_env_cfg,
     MicroduckStandUpRlCfg,
@@ -230,6 +234,15 @@ register_mjlab_task(
     env_cfg=make_microduck_roulade_env_cfg(),
     play_env_cfg=make_microduck_roulade_env_cfg(play=True),
     rl_cfg=MicroduckRouladeRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
+# Run task — run forward at 0.4 m/s on flat terrain, with a 0.5 m/s max speed limit.
+register_mjlab_task(
+    task_id="Mjlab-Run-Flat-MicroDuck",
+    env_cfg=make_microduck_run_env_cfg(),
+    play_env_cfg=make_microduck_run_env_cfg(play=True),
+    rl_cfg=MicroduckRunRlCfg,
     runner_cls=MicroduckOnPolicyRunner,
 )
 
