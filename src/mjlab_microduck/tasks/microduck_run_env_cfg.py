@@ -907,7 +907,7 @@ def make_microduck_run_env_cfg(
     )
 
     if play:
-        cfg.commands["twist"].ranges.lin_vel_x = (0.0, 0.0)
+        cfg.commands["twist"].ranges.lin_vel_x = (0.4, 0.4)
         cfg.commands["head_pose"].ranges = ((0.0, 0.0),) * 4
         cfg.commands["body_pose"].ranges = ((0.0, 0.0),) * 6
         cfg.curriculum.pop("head_pose_range", None)
