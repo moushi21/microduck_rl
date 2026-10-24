@@ -266,6 +266,7 @@ def make_microduck_run_env_cfg(
     cfg.scene.entities = {"robot": MICRODUCK_WALK_ROBOT_CFG}
     cfg.scene.sensors = (feet_ground_cfg, self_collision_cfg, foot_height_scan_cfg)
     cfg.viewer.body_name = "trunk_base"
+    cfg.viewer.distance = 1.0
 
     # Action configuration
     joint_pos_action = cfg.actions["joint_pos"]
