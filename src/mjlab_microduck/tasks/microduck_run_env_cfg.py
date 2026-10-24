@@ -298,8 +298,8 @@ def make_microduck_run_env_cfg(
     # 2.0 / std²=0.05 it costs ~0.19/step: enough gradient to hold the trunk
     # level in steady gait while transient lean (push recovery, accel) stays
     # affordable.
-    cfg.rewards["upright"].weight = 2.0
-    cfg.rewards["upright"].params["std"] = math.sqrt(0.05)
+    cfg.rewards["upright"].weight = 0.8
+    cfg.rewards["upright"].params["std"] = math.sqrt(0.1)
 
     # Foot-specific configurations. In mjlab 1.3.0 foot_swing_height is fully
     # sensor-driven (no asset_cfg); only foot_clearance/foot_slip still carry an
@@ -341,7 +341,7 @@ def make_microduck_run_env_cfg(
 
     # Velocity tracking rewards
     cfg.rewards["track_linear_velocity"].weight = 2.0
-    cfg.rewards["track_linear_velocity"].params["std"] = math.sqrt(0.1)
+    cfg.rewards["track_linear_velocity"].params["std"] = math.sqrt(0.2)
     cfg.rewards["track_angular_velocity"].weight = 2.0
     cfg.rewards["track_angular_velocity"].params["std"] = math.sqrt(0.5)
 
@@ -646,7 +646,7 @@ def make_microduck_run_env_cfg(
     # lin ±0.4 / ang ±2.0 outpaced the robot's capability and tracked a
     # post-iter-1000 reward/episode-length decline. ang ±1.0 is the big
     # change — it makes turning learnable.
-    command.ranges.lin_vel_x = (0.0, 0.5)
+    command.ranges.lin_vel_x = (0.0, 0.8)
     command.ranges.lin_vel_y = (0.0, 0.0)
     command.ranges.ang_vel_z = (0.0, 0.0)
     command.viz.z_offset = 0.0
@@ -782,11 +782,11 @@ def make_microduck_run_env_cfg(
             "reward_name": "action_rate_l2",
             "weight_stages": [
                 {"step": 0, "weight": -0.1},
-                {"step": 500 * NUM_STEPS_PER_ENV, "weight": -0.2},
-                {"step": 750 * NUM_STEPS_PER_ENV, "weight": -0.4},
-                {"step": 1000 * NUM_STEPS_PER_ENV, "weight": -0.6},
-                {"step": 1250 * NUM_STEPS_PER_ENV, "weight": -0.8},
-                {"step": 1500 * NUM_STEPS_PER_ENV, "weight": -1.0},
+                {"step": 500 * NUM_STEPS_PER_ENV, "weight": -0.15},
+                {"step": 750 * NUM_STEPS_PER_ENV, "weight": -0.20},
+                {"step": 1000 * NUM_STEPS_PER_ENV, "weight": -0.25},
+                {"step": 1250 * NUM_STEPS_PER_ENV, "weight": -0.28},
+                {"step": 1500 * NUM_STEPS_PER_ENV, "weight": -0.30},
             ],
         },
     )
@@ -900,15 +900,15 @@ def make_microduck_run_env_cfg(
             "reward_name": "head_pose_bias",
             "weight_stages": [
                 {"step": 0, "weight": 0.0},
-                {"step": 600 * NUM_STEPS_PER_ENV, "weight": 1.0},
-                {"step": 1000 * NUM_STEPS_PER_ENV, "weight": 2.0},
-                {"step": 1500 * NUM_STEPS_PER_ENV, "weight": 3.0},
+                {"step": 600 * NUM_STEPS_PER_ENV, "weight": 0.4},
+                {"step": 1000 * NUM_STEPS_PER_ENV, "weight": 0.6},
+                {"step": 1500 * NUM_STEPS_PER_ENV, "weight": 0.8},
             ],
         },
     )
 
     if play:
-        cfg.commands["twist"].ranges.lin_vel_x = (0.5, 0.5)
+        cfg.commands["twist"].ranges.lin_vel_x = (0.8, 0.8)
         cfg.commands["head_pose"].ranges = ((0.0, 0.0),) * 4
         cfg.commands["body_pose"].ranges = ((0.0, 0.0),) * 6
         cfg.curriculum.pop("head_pose_range", None)
