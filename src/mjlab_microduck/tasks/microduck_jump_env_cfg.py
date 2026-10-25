@@ -355,11 +355,13 @@ def make_microduck_jump_env_cfg(
     cfg.rewards["foot_swing_height"].params["command_threshold"] = 0.01
     cfg.rewards["foot_swing_height"].params["target_height"] = 0.01  # Increased from 0.01 to force foot lifting
 
-    # Z軸（垂直上方向）への跳躍速度に対する報酬
+    # Z軸（垂直上方向）への上昇速度に対する報酬（実在する関数を指定）
     cfg.rewards["base_lin_vel_z"] = RewardTermCfg(
-        func=mdp.base_lin_vel_z_above_threshold,
+        func=microduck_mdp.com_upward_velocity,
         weight=5.0,
-        params={"threshold": 0.15},
+        params={
+            "max_height": 0.25,  # ロボットが目標高度に達するまで上昇速度を評価
+        },
     )
 
     # NOTE: no neck-only action-rate term — the shared action_rate_l2 sums over
