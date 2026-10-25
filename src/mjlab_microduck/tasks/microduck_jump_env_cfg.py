@@ -288,8 +288,9 @@ def make_microduck_jump_env_cfg(
 
     # Body-specific reward configurations
     cfg.rewards["upright"].params["asset_cfg"].body_names = ("trunk_base",)
-    cfg.rewards["upright"].weight = 0.5
-    cfg.rewards["upright"].params["std"] = math.sqrt(0.2)
+    # 直立維持を強化（前傾して頭からダイブするのを防止）
+    cfg.rewards["upright"].weight = 2.0
+    cfg.rewards["upright"].params["std"] = math.sqrt(0.05)
 
     for reward_name in ["foot_clearance", "foot_slip"]:
         cfg.rewards[reward_name].params["asset_cfg"].site_names = site_names
@@ -307,14 +308,26 @@ def make_microduck_jump_env_cfg(
         params={"sensor_name": self_collision_cfg.name},
     )
 
-    # 滞空時間報酬: 静止コマンド(0,0,0)でも報酬が入るよう command_name を None に設定
-    cfg.rewards["air_time"].weight = 8.0
-    cfg.rewards["air_time"].params["command_name"] = None  # コマンド依存ゲートを解除
-    cfg.rewards["air_time"].params["threshold_min"] = 0.15
-    cfg.rewards["air_time"].params["threshold_max"] = 0.80
+    # 滞空時間報酬: 両足が「同時に」浮いた時だけ報酬を付与（片足ずつの歩行ハックを排除）
+    cfg.rewards["air_time"] = RewardTermCfg(
+        func=microduck_mdp.both_feet_air_time,
+        weight=8.0,
+        params={
+            "sensor_name": feet_ground_cfg.name,
+            "threshold_min": 0.15,
+            "threshold_max": 0.80,
+        },
+    )
 
-    cfg.rewards["body_ang_vel"].weight = -0.05
-    cfg.rewards["angular_momentum"].weight = -0.02
+    # 前転モーメント・ピッチ軸回転を強く抑制
+    cfg.rewards["body_ang_vel"].weight = -0.2
+    cfg.rewards["angular_momentum"].weight = -0.05
+
+    # 水平移動（前進・歩行・助走）を厳しく禁止（垂直Z速度はペナルティ対象外）
+    cfg.rewards["base_xy_vel_penalty"] = RewardTermCfg(
+        func=microduck_mdp.base_xy_velocity_penalty,
+        weight=-2.0,
+    )
 
     # Velocity tracking rewards
     cfg.rewards["track_linear_velocity"].weight = 0.0
@@ -369,6 +382,8 @@ def make_microduck_jump_env_cfg(
         time_out=False,
         params={"sensor_names": (feet_ground_cfg.name,)},
     )
+    # 40°以上の傾き・転倒で即座にエピソード終了（顔面ダイブを未然に防ぐ）
+    cfg.terminations["fell_over"].params["limit_angle"] = math.radians(40.0)
 
     cfg.events["reset_base"].params["pose_range"]["z"] = (0.12, 0.13)
 
@@ -908,6 +923,8 @@ def make_microduck_jump_env_cfg(
 
     if play:
         cfg.commands["twist"].ranges.lin_vel_x = (0.0, 0.0)
+        cfg.commands["twist"].ranges.lin_vel_y = (0.0, 0.0)
+        cfg.commands["twist"].ranges.ang_vel_z = (0.0, 0.0)
         cfg.commands["head_pose"].ranges = ((0.0, 0.0),) * 4
         cfg.commands["body_pose"].ranges = ((0.0, 0.0),) * 6
         cfg.curriculum.pop("head_pose_range", None)

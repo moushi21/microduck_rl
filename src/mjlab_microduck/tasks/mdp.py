@@ -7725,3 +7725,39 @@ def reward_param_curriculum(
 
     term_cfg.params[param_name] = current_val
     return torch.tensor([current_val], device=env.device, dtype=torch.float32)
+
+
+def base_xy_velocity_penalty(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Penalize horizontal (XY in world frame) linear velocity: vx² + vy² (positive; use a negative weight).
+    Keeps the robot in place during stationary jump while leaving vertical vz free."""
+    asset: Entity = env.scene[asset_cfg.name]
+    v_xy = asset.data.root_link_lin_vel_w[:, :2]
+    return torch.nan_to_num(torch.sum(torch.square(v_xy), dim=1), nan=0.0)
+
+
+def both_feet_air_time(
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+    threshold_min: float = 0.15,
+    threshold_max: float = 0.80,
+) -> torch.Tensor:
+    """Reward air time only when BOTH feet are simultaneously airborne (jumping).
+
+    Prevents single-foot stepping or walking from farming the air_time reward.
+    """
+    sensor: ContactSensor = env.scene[sensor_name]
+    current_air_time = sensor.data.current_air_time
+    assert current_air_time is not None
+    in_range = (current_air_time > threshold_min) & (current_air_time < threshold_max)
+    both_in_air = torch.all(in_range, dim=1)
+
+    # Log mean air time when airborne
+    in_air = current_air_time > 0
+    num_in_air = torch.sum(in_air.float())
+    mean_air_time = torch.sum(current_air_time * in_air.float()) / torch.clamp(num_in_air, min=1)
+    env.extras["log"]["Metrics/air_time_mean"] = mean_air_time
+
+    return both_in_air.float()
