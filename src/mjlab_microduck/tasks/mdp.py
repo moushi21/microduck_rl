@@ -7707,7 +7707,7 @@ def roulade_lateral_velocity_penalty(
 
 from typing import Any
 def reward_param_curriculum(
-    env: Any,
+    env,
     env_ids: torch.Tensor,
     reward_name: str,
     param_name: str,
@@ -7719,7 +7719,13 @@ def reward_param_curriculum(
     for stage in stages:
         if step >= stage["step"]:
             current_val = stage["value"]
-    if current_val is not None and reward_name in env.reward_manager.terms:
-        term = env.reward_manager.terms[reward_name]
-        if hasattr(term, "params") and param_name in term.params:
-            term.params[param_name] = current_val
+            
+    if current_val is not None and hasattr(env, "reward_manager"):
+        # RewardManager の内部辞書 _terms から該当する報酬項目の設定を取得
+        terms = getattr(env.reward_manager, "_terms", {})
+        if reward_name in terms:
+            term = terms[reward_name]
+            if hasattr(term, "params") and param_name in term.params:
+                term.params[param_name] = current_val
+            elif isinstance(term, dict) and "params" in term and param_name in term["params"]:
+                term["params"][param_name] = current_val
