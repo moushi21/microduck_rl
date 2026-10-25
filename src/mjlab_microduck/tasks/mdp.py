@@ -7705,27 +7705,23 @@ def roulade_lateral_velocity_penalty(
     asset: Entity = env.scene[asset_cfg.name]
     return torch.nan_to_num(asset.data.root_link_lin_vel_b[:, 1].pow(2), nan=0.0)
 
-from typing import Any
 def reward_param_curriculum(
-    env,
+    env: ManagerBasedRlEnv,
     env_ids: torch.Tensor,
     reward_name: str,
     param_name: str,
     stages: list[dict],
-):
+) -> torch.Tensor:
     """Curriculum term to update a reward parameter based on current step count."""
+    del env_ids  # Unused
+
+    term_cfg = env.reward_manager.get_term_cfg(reward_name)
+    current_val = stages[0]["value"]
     step = env.common_step_counter
-    current_val = None
+
     for stage in stages:
         if step >= stage["step"]:
             current_val = stage["value"]
-            
-    if current_val is not None and hasattr(env, "reward_manager"):
-        # RewardManager の内部辞書 _terms から該当する報酬項目の設定を取得
-        terms = getattr(env.reward_manager, "_terms", {})
-        if reward_name in terms:
-            term = terms[reward_name]
-            if hasattr(term, "params") and param_name in term.params:
-                term.params[param_name] = current_val
-            elif isinstance(term, dict) and "params" in term and param_name in term["params"]:
-                term["params"][param_name] = current_val
+
+    term_cfg.params[param_name] = current_val
+    return torch.tensor([current_val], device=env.device, dtype=torch.float32)

@@ -261,6 +261,7 @@ def make_microduck_jump_env_cfg(
 
     # Base configuration
     cfg = make_velocity_env_cfg()
+    cfg.episode_length_s = 4.0  # 単発ジャンプ用に4秒に設定（歩行用の20秒から短縮）
 
     # Robot setup
     cfg.scene.entities = {"robot": MICRODUCK_WALK_ROBOT_CFG}
@@ -278,61 +279,37 @@ def make_microduck_jump_env_cfg(
     cfg.rewards["pose"].params["std_standing"] = std_standing  # tight when command=0
     cfg.rewards["pose"].params["std_walking"] = std_walking
     cfg.rewards["pose"].params["std_running"] = std_walking
-    # Pose reward operates on LEG joints only. Head/neck are command-driven
-    # (head_pose_tracking) — if they were in this reward too, it would pull
-    # them to HOME while head_pose_tracking pulls them to the command, and the
-    # policy converges to "ignore the command" because pose reward dominates
-    # once head_pose_tracking's gradient dies at large commands.
     cfg.rewards["pose"].params["asset_cfg"] = SceneEntityCfg(
         "robot", joint_names=(r"^(?!passive_|.*neck.*|.*head.*).*",)
     )
     cfg.rewards["pose"].params["walking_threshold"] = 0.01
-    cfg.rewards["pose"].weight = 1.0
+    # ジャンプ時の屈伸（膝曲げ）を阻害しないよう重みを抑制 (1.0 → 0.2)
+    cfg.rewards["pose"].weight = 0.2
 
     # Body-specific reward configurations
     cfg.rewards["upright"].params["asset_cfg"].body_names = ("trunk_base",)
-    # upright: deliberately strong (2.0 / std²=0.05, was 1.0 / std²=0.1).
-    # 2026-07 pitch-vs-speed eval: the policy walks with a +2-4° steady forward
-    # lean (p90 ~6-8°) and ~2/3 of push-induced falls at speed are FORWARD. At
-    # weight 1.0 / std²=0.1 a 4° lean cost ~0.05/step — effectively free. At
-    # 2.0 / std²=0.05 it costs ~0.19/step: enough gradient to hold the trunk
-    # level in steady gait while transient lean (push recovery, accel) stays
-    # affordable.
-    cfg.rewards["upright"].weight = 0.8
+    cfg.rewards["upright"].weight = 0.5
     cfg.rewards["upright"].params["std"] = math.sqrt(0.2)
 
-    # Foot-specific configurations. In mjlab 1.3.0 foot_swing_height is fully
-    # sensor-driven (no asset_cfg); only foot_clearance/foot_slip still carry an
-    # asset_cfg whose site_names select the feet.
     for reward_name in ["foot_clearance", "foot_slip"]:
         cfg.rewards[reward_name].params["asset_cfg"].site_names = site_names
 
-    # Body-specific configurations
     cfg.rewards["body_ang_vel"].params["asset_cfg"].body_names = ("trunk_base",)
 
-    # foot_slip deliberately weak (-0.1, not -1.0): -1.0 was too restrictive
-    # for this robot's pivot-heavy turning.
     cfg.rewards["foot_slip"].weight = -0.1
     cfg.rewards["foot_slip"].params["command_threshold"] = 0.01
 
     cfg.rewards.pop("soft_landing", None)
 
-    # Self-collision penalty: discourages legs from crashing into the trunk
-    # battery holder (the self_collision_only-classed geoms on leg, leg_2,
-    # battery_holder). With proper joint-range limits the policy can't actually
-    # reach the body, but a positive signal here keeps it well clear.
     cfg.rewards["self_collisions"] = RewardTermCfg(
         func=mdp.self_collision_cost,
         weight=-1.0,
         params={"sensor_name": self_collision_cfg.name},
     )
 
-
-    # air_time window [0.125, 0.300] s. NOTE: standing still at zero command is
-    # taught by the standing_envs curriculum (→25% standing envs by ~iter 2000),
-    # not by an explicit stillness/no-stepping term.
-    cfg.rewards["air_time"].weight = 5.0
-    cfg.rewards["air_time"].params["command_threshold"] = 0.01
+    # 滞空時間報酬: 静止コマンド(0,0,0)でも報酬が入るよう command_name を None に設定
+    cfg.rewards["air_time"].weight = 8.0
+    cfg.rewards["air_time"].params["command_name"] = None  # コマンド依存ゲートを解除
     cfg.rewards["air_time"].params["threshold_min"] = 0.15
     cfg.rewards["air_time"].params["threshold_max"] = 0.80
 
@@ -342,25 +319,23 @@ def make_microduck_jump_env_cfg(
     # Velocity tracking rewards
     cfg.rewards["track_linear_velocity"].weight = 0.0
     cfg.rewards["track_linear_velocity"].params["std"] = math.sqrt(0.2)
-    cfg.rewards["track_angular_velocity"].weight = 2.0
+    # 静止で毎ステップ +2.0 稼ぐハッキングを防ぐため重みを抑制 (2.0 → 0.2)
+    cfg.rewards["track_angular_velocity"].weight = 0.2
     cfg.rewards["track_angular_velocity"].params["std"] = math.sqrt(0.5)
 
-    # Action smoothness: stage-0 value; the action_rate_weight curriculum below
-    # ramps it -0.1 → -1.0 by iter 1500.
+    # Action smoothness
     cfg.rewards["action_rate_l2"].weight = -0.1
 
-    cfg.rewards["foot_clearance"].params["command_threshold"] = 0.01
-    cfg.rewards["foot_clearance"].params["target_height"] = 0.01  # Increased from 0.01 to penalize dragging
+    # 歩行専用の足スイング報酬はジャンプ動作を阻害するため無効化
+    cfg.rewards["foot_clearance"].weight = 0.0
+    cfg.rewards["foot_swing_height"].weight = 0.0
 
-    cfg.rewards["foot_swing_height"].params["command_threshold"] = 0.01
-    cfg.rewards["foot_swing_height"].params["target_height"] = 0.01  # Increased from 0.01 to force foot lifting
-
-    # Z軸（垂直上方向）への上昇速度に対する報酬（実在する関数を指定）
+    # Z軸（垂直上方向）への上昇速度に対する報酬
     cfg.rewards["base_lin_vel_z"] = RewardTermCfg(
         func=microduck_mdp.com_upward_velocity,
         weight=5.0,
         params={
-            "max_height": 0.25,  # ロボットが目標高度に達するまで上昇速度を評価
+            "max_height": 0.25,
         },
     )
 
