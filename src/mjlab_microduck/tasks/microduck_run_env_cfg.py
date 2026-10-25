@@ -299,7 +299,7 @@ def make_microduck_run_env_cfg(
     # level in steady gait while transient lean (push recovery, accel) stays
     # affordable.
     cfg.rewards["upright"].weight = 0.8
-    cfg.rewards["upright"].params["std"] = math.sqrt(0.1)
+    cfg.rewards["upright"].params["std"] = math.sqrt(0.2)
 
     # Foot-specific configurations. In mjlab 1.3.0 foot_swing_height is fully
     # sensor-driven (no asset_cfg); only foot_clearance/foot_slip still carry an
@@ -333,14 +333,14 @@ def make_microduck_run_env_cfg(
     # not by an explicit stillness/no-stepping term.
     cfg.rewards["air_time"].weight = 3.0
     cfg.rewards["air_time"].params["command_threshold"] = 0.01
-    cfg.rewards["air_time"].params["threshold_min"] = 0.125
+    cfg.rewards["air_time"].params["threshold_min"] = 0.08
     cfg.rewards["air_time"].params["threshold_max"] = 0.300
 
     cfg.rewards["body_ang_vel"].weight = -0.05
     cfg.rewards["angular_momentum"].weight = -0.02
 
     # Velocity tracking rewards
-    cfg.rewards["track_linear_velocity"].weight = 2.0
+    cfg.rewards["track_linear_velocity"].weight = 3.5
     cfg.rewards["track_linear_velocity"].params["std"] = math.sqrt(0.2)
     cfg.rewards["track_angular_velocity"].weight = 2.0
     cfg.rewards["track_angular_velocity"].params["std"] = math.sqrt(0.5)
@@ -350,10 +350,10 @@ def make_microduck_run_env_cfg(
     cfg.rewards["action_rate_l2"].weight = -0.1
 
     cfg.rewards["foot_clearance"].params["command_threshold"] = 0.01
-    cfg.rewards["foot_clearance"].params["target_height"] = 0.02  # Increased from 0.01 to penalize dragging
+    cfg.rewards["foot_clearance"].params["target_height"] = 0.01  # Increased from 0.01 to penalize dragging
 
     cfg.rewards["foot_swing_height"].params["command_threshold"] = 0.01
-    cfg.rewards["foot_swing_height"].params["target_height"] = 0.02  # Increased from 0.01 to force foot lifting
+    cfg.rewards["foot_swing_height"].params["target_height"] = 0.01  # Increased from 0.01 to force foot lifting
 
     # NOTE: no neck-only action-rate term — the shared action_rate_l2 sums over
     # ALL action dims (neck included), and head_pose_tracking below gives the
@@ -900,9 +900,9 @@ def make_microduck_run_env_cfg(
             "reward_name": "head_pose_bias",
             "weight_stages": [
                 {"step": 0, "weight": 0.0},
-                {"step": 600 * NUM_STEPS_PER_ENV, "weight": 0.4},
-                {"step": 1000 * NUM_STEPS_PER_ENV, "weight": 0.6},
-                {"step": 1500 * NUM_STEPS_PER_ENV, "weight": 0.8},
+                {"step": 600 * NUM_STEPS_PER_ENV, "weight": 0.1},
+                {"step": 1000 * NUM_STEPS_PER_ENV, "weight": 0.2},
+                {"step": 1500 * NUM_STEPS_PER_ENV, "weight": 0.3},
             ],
         },
     )
