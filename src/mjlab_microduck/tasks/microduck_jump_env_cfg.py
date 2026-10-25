@@ -355,14 +355,11 @@ def make_microduck_jump_env_cfg(
     cfg.rewards["foot_swing_height"].params["command_threshold"] = 0.01
     cfg.rewards["foot_swing_height"].params["target_height"] = 0.01  # Increased from 0.01 to force foot lifting
 
-    ## 新規追加: Z軸（垂直上方向）への跳躍高さに対する報酬
-    cfg.rewards["base_height"] = RewardTermCfg(
-        func=microduck_mdp.base_height_l2,
+    # Z軸（垂直上方向）への跳躍速度に対する報酬
+    cfg.rewards["base_lin_vel_z"] = RewardTermCfg(
+        func=mdp.base_lin_vel_z_above_threshold,
         weight=5.0,
-        params={
-            "target_height": 0.14,
-            "asset_cfg": SceneEntityCfg("robot", body_names=("trunk_base",)),
-        },
+        params={"threshold": 0.15},
     )
 
     # NOTE: no neck-only action-rate term — the shared action_rate_l2 sums over
@@ -917,17 +914,17 @@ def make_microduck_jump_env_cfg(
         },
     )
 
-    # 学習の進展に合わせてジャンプ目標高度（target_height）を段階的に上げる
+    # 学習の進展に合わせて必要滞空時間（threshold_min）を段階的に引き上げ、より高いジャンプを強制する
     cfg.curriculum["jump_height_curriculum"] = CurriculumTermCfg(
         func=microduck_mdp.reward_param_curriculum,
         params={
-            "reward_name": "base_height",
-            "param_name": "target_height",
+            "reward_name": "air_time",
+            "param_name": "threshold_min",
             "stages": [
-                {"step": 0,                   "value": 0.14},  # 初期：低いホッピング
-                {"step": 500 * NUM_STEPS_PER_ENV,  "value": 0.17},  # 中期：中ジャンプ
-                {"step": 1000 * NUM_STEPS_PER_ENV, "value": 0.20},  # 後期：高ジャンプ
-                {"step": 1500 * NUM_STEPS_PER_ENV, "value": 0.22},  # 仕上げ
+                {"step": 0,                   "value": 0.15},  # 初期：短い滞空時間 (0.15s)
+                {"step": 500 * NUM_STEPS_PER_ENV,  "value": 0.20},  # 中期：0.20s
+                {"step": 1000 * NUM_STEPS_PER_ENV, "value": 0.25},  # 後期：0.25s
+                {"step": 1500 * NUM_STEPS_PER_ENV, "value": 0.30},  # 仕上げ：高いジャンプ (0.30s)
             ],
         },
     )
