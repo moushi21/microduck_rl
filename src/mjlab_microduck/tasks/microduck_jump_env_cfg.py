@@ -918,7 +918,7 @@ def make_microduck_jump_env_cfg(
 
     # 学習の進展に合わせて必要滞空時間（threshold_min）を段階的に引き上げ、より高いジャンプを強制する
     cfg.curriculum["jump_height_curriculum"] = CurriculumTermCfg(
-        func=microduck_mdp.reward_param_curriculum,
+        func=microduck_mdp.reward_param,
         params={
             "reward_name": "air_time",
             "param_name": "threshold_min",
