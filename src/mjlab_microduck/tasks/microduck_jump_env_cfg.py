@@ -355,15 +355,9 @@ def make_microduck_jump_env_cfg(
     cfg.rewards["foot_swing_height"].params["command_threshold"] = 0.01
     cfg.rewards["foot_swing_height"].params["target_height"] = 0.01  # Increased from 0.01 to force foot lifting
 
-    # # 新規追加: Z軸（垂直上方向）への跳躍速度に対する報酬
-    # cfg.rewards["base_lin_vel_z"] = RewardTermCfg(
-    #     func=mdp.base_lin_vel_z_above_threshold,
-    #     weight=5.0,
-    #     params={"threshold": 0.15},
-    # )
-    # 段階的な高度設定用の目標高さ報酬（ベースの高さ 0.14 m 以上を評価）
+    ## 新規追加: Z軸（垂直上方向）への跳躍高さに対する報酬
     cfg.rewards["base_height"] = RewardTermCfg(
-        func=mdp.base_height_l2,
+        func=microduck_mdp.base_height_l2,
         weight=5.0,
         params={
             "target_height": 0.14,
