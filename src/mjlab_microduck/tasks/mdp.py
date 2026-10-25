@@ -7704,3 +7704,22 @@ def roulade_lateral_velocity_penalty(
     """Body-frame lateral (y) linear velocity² — keeps the roll straight."""
     asset: Entity = env.scene[asset_cfg.name]
     return torch.nan_to_num(asset.data.root_link_lin_vel_b[:, 1].pow(2), nan=0.0)
+
+from typing import Any
+def reward_param_curriculum(
+    env: Any,
+    env_ids: torch.Tensor,
+    reward_name: str,
+    param_name: str,
+    stages: list[dict],
+):
+    """Curriculum term to update a reward parameter based on current step count."""
+    step = env.common_step_counter
+    current_val = None
+    for stage in stages:
+        if step >= stage["step"]:
+            current_val = stage["value"]
+    if current_val is not None and reward_name in env.reward_manager.terms:
+        term = env.reward_manager.terms[reward_name]
+        if hasattr(term, "params") and param_name in term.params:
+            term.params[param_name] = current_val
