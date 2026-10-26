@@ -4772,6 +4772,8 @@ class VelocityCommandCommandOnly(UniformVelocityCommand):
         self.vel_command_w[turn_ids] = self.vel_command_b[turn_ids]
 
     def _debug_vis_impl(self, visualizer: "DebugVisualizer") -> None:
+        if not getattr(self.cfg, "debug_vis", True):
+            return
         batch = visualizer.env_idx
         if batch >= self.num_envs:
             return
@@ -4785,7 +4787,7 @@ class VelocityCommandCommandOnly(UniformVelocityCommand):
         base_mat_w = base_mat_ws[batch]
         cmd = cmds[batch]
 
-        if np.linalg.norm(base_pos_w) < 1e-6:
+        if np.linalg.norm(base_pos_w) < 1e-6 or np.linalg.norm(cmd[:2]) < 1e-4:
             return
 
         def local_to_world(vec: np.ndarray) -> np.ndarray:
@@ -7741,8 +7743,8 @@ def base_xy_velocity_penalty(
 def both_feet_air_time(
     env: ManagerBasedRlEnv,
     sensor_name: str,
-    threshold_min: float = 0.15,
-    threshold_max: float = 0.80,
+    threshold_min: float = 0.08,
+    threshold_max: float = 0.50,
 ) -> torch.Tensor:
     """Reward air time only when BOTH feet are simultaneously airborne (jumping).
 

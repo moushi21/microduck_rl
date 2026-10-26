@@ -24,8 +24,8 @@ NUM_STEPS_PER_ENV = 24
 # Fraction of envs commanded to spin on the spot (lin=0, |ang| ∈ [0.4·max, max]).
 TURN_IN_PLACE_FRACTION = 0.0
 
-# Symmetry
-ENABLE_SYMMETRY = False
+# Symmetry — ジャンプは完全左右対称動作のため有効化
+ENABLE_SYMMETRY = True
 
 # Domain randomization toggles
 ENABLE_COM_RANDOMIZATION = True
@@ -311,11 +311,11 @@ def make_microduck_jump_env_cfg(
     # 滞空時間報酬: 両足が「同時に」浮いた時だけ報酬を付与（片足ずつの歩行ハックを排除）
     cfg.rewards["air_time"] = RewardTermCfg(
         func=microduck_mdp.both_feet_air_time,
-        weight=8.0,
+        weight=10.0,
         params={
             "sensor_name": feet_ground_cfg.name,
-            "threshold_min": 0.15,
-            "threshold_max": 0.80,
+            "threshold_min": 0.08,
+            "threshold_max": 0.50,
         },
     )
 
@@ -336,19 +336,19 @@ def make_microduck_jump_env_cfg(
     cfg.rewards["track_angular_velocity"].weight = 0.2
     cfg.rewards["track_angular_velocity"].params["std"] = math.sqrt(0.5)
 
-    # Action smoothness
-    cfg.rewards["action_rate_l2"].weight = -0.1
+    # Action smoothness — 高速屈伸・小刻みなピストン振動を抑制するため強化 (-0.1 → -0.2)
+    cfg.rewards["action_rate_l2"].weight = -0.2
 
     # 歩行専用の足スイング報酬はジャンプ動作を阻害するため無効化
     cfg.rewards["foot_clearance"].weight = 0.0
     cfg.rewards["foot_swing_height"].weight = 0.0
 
-    # Z軸（垂直上方向）への上昇速度に対する報酬
+    # Z軸（垂直上方向）への初動ブートストラップ補助（高速屈伸ハックを防ぐため重みを 5.0 → 1.0 に抑制）
     cfg.rewards["base_lin_vel_z"] = RewardTermCfg(
         func=microduck_mdp.com_upward_velocity,
-        weight=5.0,
+        weight=1.0,
         params={
-            "max_height": 0.25,
+            "max_height": 0.20,
         },
     )
 
@@ -638,20 +638,17 @@ def make_microduck_jump_env_cfg(
     # (make_velocity_env_cfg() returns objects with shared mutable references;
     # standup/ground_pick envs mutate commands["twist"] in place, zeroing ranges)
     command: UniformVelocityCommandCfg = deepcopy(cfg.commands["twist"])
-    cfg.commands["twist"] = command
-    command.rel_standing_envs = 0.02  # small but non-zero from the start, ramped up by curriculum
+    command.rel_standing_envs = 0.0
     command.rel_heading_envs = 0.0
-    # Modest, FIXED command ranges (no widening curriculum): a ramp to
-    # lin ±0.4 / ang ±2.0 outpaced the robot's capability and tracked a
-    # post-iter-1000 reward/episode-length decline. ang ±1.0 is the big
-    # change — it makes turning learnable.
+    command.rel_forward_envs = 0.0   # 前進強制上書きバグを根絶（青矢印の原因）
     command.ranges.lin_vel_x = (0.0, 0.0)
     command.ranges.lin_vel_y = (0.0, 0.0)
     command.ranges.ang_vel_z = (0.0, 0.0)
+    command.debug_vis = False        # 前進青矢印の描画をOFF
     command.viz.z_offset = 0.0
     cfg.commands["twist"] = microduck_mdp.VelocityCommandCommandOnlyCfg(**vars(command))
-    # Explicit turn-in-place bucket (see TURN_IN_PLACE_FRACTION above).
-    cfg.commands["twist"].rel_turn_in_place_envs = TURN_IN_PLACE_FRACTION
+    cfg.commands["twist"].rel_turn_in_place_envs = 0.0
+    cfg.commands["twist"].debug_vis = False
 
     # Head pose command (4D deltas from HOME, in joint order:
     #   neck_pitch, head_pitch, head_yaw, head_roll). Tracked as a primary
@@ -906,22 +903,24 @@ def make_microduck_jump_env_cfg(
         },
     )
 
-    # 学習の進展に合わせて必要滞空時間（threshold_min）を段階的に引き上げ、より高いジャンプを強制する
+    # 学習の進展に合わせて必要滞空時間（threshold_min）を段階的に引き上げ（Microduckの物理限界に即した多段カリキュラム）
     cfg.curriculum["jump_height_curriculum"] = CurriculumTermCfg(
         func=microduck_mdp.reward_param_curriculum,
         params={
             "reward_name": "air_time",
             "param_name": "threshold_min",
             "stages": [
-                {"step": 0,                   "value": 0.15},  # 初期：0.15s
-                {"step": 500 * NUM_STEPS_PER_ENV,  "value": 0.20},  # 500 iter：0.20s
-                {"step": 1000 * NUM_STEPS_PER_ENV, "value": 0.25},  # 1000 iter：0.25s
-                {"step": 1500 * NUM_STEPS_PER_ENV, "value": 0.30},  # 1500 iter：0.30s
+                {"step": 0,                         "value": 0.08},  # 0~1000 iter: 0.08s (~0.8cm) 初歩離地
+                {"step": 1000 * NUM_STEPS_PER_ENV, "value": 0.10},  # 1000~2000 iter: 0.10s (~1.2cm) 小ジャンプ
+                {"step": 2000 * NUM_STEPS_PER_ENV, "value": 0.12},  # 2000~3000 iter: 0.12s (~1.8cm) 確実な跳躍
+                {"step": 3000 * NUM_STEPS_PER_ENV, "value": 0.14},  # 3000~4000 iter: 0.14s (~2.4cm) 綺麗なジャンプ
+                {"step": 4000 * NUM_STEPS_PER_ENV, "value": 0.16},  # 4000~5000 iter: 0.16s (~3.1cm) フルジャンプ
             ],
         },
     )
 
     if play:
+        cfg.commands["twist"].debug_vis = False
         cfg.commands["twist"].ranges.lin_vel_x = (0.0, 0.0)
         cfg.commands["twist"].ranges.lin_vel_y = (0.0, 0.0)
         cfg.commands["twist"].ranges.ang_vel_z = (0.0, 0.0)
