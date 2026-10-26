@@ -7743,25 +7743,132 @@ def base_xy_velocity_penalty(
 def both_feet_air_time(
     env: ManagerBasedRlEnv,
     sensor_name: str,
-    threshold_min: float = 0.08,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    threshold_min: float = 0.0,
     threshold_max: float = 0.50,
+    min_com_z: float = 0.100,
 ) -> torch.Tensor:
-    """Reward air time only when BOTH feet are simultaneously airborne (jumping).
+    """Reward air time when BOTH feet are simultaneously airborne and upright (jumping).
 
-    Prevents single-foot stepping or walking from farming the air_time reward.
+    Unit-scaled dense reward: step 1 of simultaneous flight (0.02s) immediately scores
+    ~0.7, scaling linearly with simultaneous flight duration (0.10s -> 1.5, 0.15s -> 2.0),
+    plus a stage bonus when exceeding ``threshold_min``. Gated by uprightness and trunk
+    height so collapsing/diving with tucked knees cannot farm flight reward.
     """
     from mjlab.sensor import ContactSensor
 
     sensor: ContactSensor = env.scene[sensor_name]
     current_air_time = sensor.data.current_air_time
     assert current_air_time is not None
-    in_range = (current_air_time > threshold_min) & (current_air_time < threshold_max)
-    both_in_air = torch.all(in_range, dim=1)
 
-    # Log mean air time when airborne
-    in_air = current_air_time > 0
+    # Simultaneous air time of both feet (0 if either foot touches ground)
+    min_air_time = torch.min(current_air_time, dim=1).values
+    both_in_air = (min_air_time > 0.0).float()
+
+    asset: Entity = env.scene[asset_cfg.name]
+    com_z = torch.nan_to_num(
+        asset.data.root_link_pos_w[:, 2] - env.scene.terrain.env_origins[:, 2], nan=0.0
+    )
+    g_b = torch.nan_to_num(asset.data.projected_gravity_b, nan=0.0)
+    upright_gate = torch.exp(-torch.sum(torch.square(g_b[:, :2]), dim=1) / 0.12)
+    above_crouch_gate = (com_z > min_com_z).float()
+
+    clamped_air = torch.clamp(min_air_time, min=0.0, max=threshold_max)
+    air_score = both_in_air * (0.5 + clamped_air / 0.10)
+    if threshold_min > 0.0:
+        air_score = air_score + (min_air_time >= threshold_min).float() * 0.5
+
+    # Ignore the first 10 steps (0.20s) after reset while the robot settles from z=0.12..0.13m
+    settle_gate = (env.episode_length_buf > 10).float()
+    air_reward = air_score * upright_gate * above_crouch_gate * settle_gate
+
+    # Log metrics
+    in_air = min_air_time > 0
     num_in_air = torch.sum(in_air.float())
-    mean_air_time = torch.sum(current_air_time * in_air.float()) / torch.clamp(num_in_air, min=1)
+    mean_air_time = torch.sum(min_air_time * in_air.float()) / torch.clamp(num_in_air, min=1)
     env.extras["log"]["Metrics/air_time_mean"] = mean_air_time
+    env.extras["log"]["Metrics/both_feet_in_air"] = torch.mean(in_air.float())
 
-    return both_in_air.float()
+    return air_reward
+
+
+def both_feet_jump_height(
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    stand_height: float = 0.115,
+    ref_lift: float = 0.03,
+) -> torch.Tensor:
+    """Reward vertical trunk height lift above STAND_Z (0.115 m) strictly while BOTH feet are airborne.
+
+    Normalized so a ``ref_lift`` (3 cm) vertical jump scores 1.0 when upright.
+    Gives zero reward on the ground (eliminating ground squatting/tiptoe hacks) and
+    zero reward for pulling knees up while dropping the trunk below ``stand_height``.
+    """
+    from mjlab.sensor import ContactSensor
+
+    sensor: ContactSensor = env.scene[sensor_name]
+    current_air_time = sensor.data.current_air_time
+    assert current_air_time is not None
+    min_air_time = torch.min(current_air_time, dim=1).values
+    both_in_air = (min_air_time > 0.0).float()
+
+    asset: Entity = env.scene[asset_cfg.name]
+    com_z = torch.nan_to_num(
+        asset.data.root_link_pos_w[:, 2] - env.scene.terrain.env_origins[:, 2], nan=0.0
+    )
+    g_b = torch.nan_to_num(asset.data.projected_gravity_b, nan=0.0)
+    upright_gate = torch.exp(-torch.sum(torch.square(g_b[:, :2]), dim=1) / 0.12)
+
+    lift_m = torch.clamp(com_z - stand_height, min=0.0, max=0.08)
+    settle_gate = (env.episode_length_buf > 10).float()
+    env.extras["log"]["Metrics/jump_lift_mean"] = torch.mean(lift_m * both_in_air * settle_gate)
+
+    return both_in_air * (lift_m / ref_lift) * upright_gate * settle_gate
+
+
+def jump_takeoff_velocity(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    min_height: float = 0.108,
+    max_height: float = 0.175,
+    max_vz: float = 1.2,
+) -> torch.Tensor:
+    """Bootstrap upward trunk velocity ONLY above ``min_height`` (near standing extension).
+
+    Unlike unconstrained ``com_upward_velocity``, squatting up and down below ``min_height``
+    (0.075–0.108 m, rapid knee-bobbing on the floor) earns strictly 0.0, while accelerating
+    upward through standing extension (0.108 m+) into flight earns immediate dense reward.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    com_z = torch.nan_to_num(
+        asset.data.root_link_pos_w[:, 2] - env.scene.terrain.env_origins[:, 2], nan=0.0
+    )
+    vz = torch.nan_to_num(asset.data.root_link_lin_vel_w[:, 2], nan=0.0)
+    g_b = torch.nan_to_num(asset.data.projected_gravity_b, nan=0.0)
+    upright_gate = torch.exp(-torch.sum(torch.square(g_b[:, :2]), dim=1) / 0.12)
+
+    in_band = ((com_z > min_height) & (com_z < max_height)).float()
+    settle_gate = (env.episode_length_buf > 10).float()
+    return torch.clamp(vz, min=0.0, max=max_vz) * in_band * upright_gate * settle_gate
+
+
+def single_foot_air_cost(
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+) -> torch.Tensor:
+    """Cost (≥ 0; pair with a negative weight) when ONLY ONE foot is off the ground.
+
+    Returns 0 when both feet are grounded (standing/crouching) AND 0 when both feet
+    are simultaneously airborne (clean symmetric jump). Directly penalizes stepping
+    in place, single-leg hops, and staggered takeoff/landing.
+    """
+    from mjlab.sensor import ContactSensor
+
+    sensor: ContactSensor = env.scene[sensor_name]
+    current_air_time = sensor.data.current_air_time
+    assert current_air_time is not None
+    in_air = current_air_time > 0.0
+    one_foot_only = in_air.any(dim=1) & (~in_air.all(dim=1))
+    settle_gate = (env.episode_length_buf > 10).float()
+    return one_foot_only.float() * settle_gate

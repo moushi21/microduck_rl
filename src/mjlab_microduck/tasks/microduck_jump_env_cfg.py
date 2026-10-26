@@ -1,25 +1,22 @@
-"""Microduck velocity (walking) environment.
+"""Microduck stationary vertical jump environment (Mjlab-Jump-Flat-MicroDuck).
 
-The main locomotion task: velocity-command tracking + head-pose commands.
-The reward/regularization recipe is locomotion-focused (lean tracking +
-gait/feet terms, curriculum-ramped action-rate smoothing), with:
-
-  - foot_slip kept at -0.1 (deliberately weak — stronger was too restrictive
-    for this robot's pivot-heavy turning)
-  - fixed, modest command ranges (ang ±1.0 makes turning learnable) instead of
-    a widening curriculum that outpaced the robot's capability
-  - turn-in-place: 15% of envs get lin=0 + |ang| ∈ [0.4, 1.0] (2026-07 audit:
-    independent uniform sampling makes spin-on-the-spot ~2% of data → untrained)
-  - head_pose_tracking as a primary objective, plus an EMA-based head_pose_bias
-    penalty that prices only the escapable DC head droop (see below)
-  - body_pose tracking infra kept intact but DISABLED (weight 0) so the obs
-    slot stays alive for envs that use it
+Symmetric two-footed vertical jumping in place on flat terrain:
+  - Unit-scaled dense simultaneous air-time + trunk-lift above STAND_Z (0.115 m),
+    gated by uprightness and post-spawn settle (eliminates both the sparse-reward
+    do-nothing basin and spawn-drop/tuck-collapse exploits).
+  - Height-gated takeoff velocity bootstrap (only above 0.108 m, so ground
+    knee-bobbing between 0.075 and 0.108 m earns strictly zero).
+  - Single-foot air cost + bilateral PPO mirror loss (ENABLE_SYMMETRY=True) to
+    enforce simultaneous two-foot takeoff and simultaneous two-foot landing.
+  - Gentle post-discovery action-rate curriculum (-0.01 -> -0.06) and steady
+    near-HOME head pose so the 280 g head stays centered over the support polygon.
 """
 
 import math
 from copy import deepcopy
 
 NUM_STEPS_PER_ENV = 24
+STAND_Z = 0.115  # Measured Microduck standing trunk height on flat ground (m)
 
 # Fraction of envs commanded to spin on the spot (lin=0, |ang| ∈ [0.4·max, max]).
 TURN_IN_PLACE_FRACTION = 0.0
@@ -194,25 +191,19 @@ def make_microduck_jump_env_cfg(
     play: bool = False,
     rough: bool = False,
 ) -> ManagerBasedRlEnvCfg:
-    """Create Microduck velocity tracking environment configuration."""
+    """Create Microduck stationary vertical jump environment configuration."""
 
     std_standing = {
-        # Lower body — tighter to keep the robot in home pose when standing
-        r".*hip_yaw.*": 0.1,
-        r".*hip_roll.*": 0.05,  # 0.1→0.06→0.05 — hold the 5°-inward stance (sole sits flat), stop leg splay
-        r".*hip_pitch.*": 0.15,
-        r".*knee.*": 0.15,
-        r".*ankle.*": 0.1,
+        # hip_yaw / hip_roll は厳格にHOME付近へ拘束して開脚・ねじれを防ぎつつ、
+        # hip_pitch / knee / ankle は大きく緩めて深い屈伸と跳躍・着地吸収を許容する
+        r".*hip_yaw.*": 0.08,
+        r".*hip_roll.*": 0.05,
+        r".*hip_pitch.*": 0.80,
+        r".*knee.*": 0.90,
+        r".*ankle.*": 0.60,
     }
 
-    std_walking = {
-        # Lower body
-        r".*hip_yaw.*": 0.3,
-        r".*hip_roll.*": 0.05,  # 0.1→0.06→0.05 — hold the 5°-inward stance, stop the leg splay to vertical
-        r".*hip_pitch.*": 0.4,
-        r".*knee.*": 0.4,
-        r".*ankle.*": 0.25, # was 0.15
-    }
+    std_walking = std_standing
 
     site_names = ["left_foot", "right_foot"]
 
@@ -261,7 +252,7 @@ def make_microduck_jump_env_cfg(
 
     # Base configuration
     cfg = make_velocity_env_cfg()
-    cfg.episode_length_s = 4.0  # 単発ジャンプ用に4秒に設定（歩行用の20秒から短縮）
+    cfg.episode_length_s = 8.0  # 複数回のジャンプ＋着地後の姿勢立て直しまで一貫して学習させるため8秒に設定
 
     # Robot setup
     cfg.scene.entities = {"robot": MICRODUCK_WALK_ROBOT_CFG}
@@ -276,29 +267,30 @@ def make_microduck_jump_env_cfg(
 
     # === REWARDS ===
     # Pose reward configuration
-    cfg.rewards["pose"].params["std_standing"] = std_standing  # tight when command=0
+    cfg.rewards["pose"].params["std_standing"] = std_standing
     cfg.rewards["pose"].params["std_walking"] = std_walking
     cfg.rewards["pose"].params["std_running"] = std_walking
     cfg.rewards["pose"].params["asset_cfg"] = SceneEntityCfg(
         "robot", joint_names=(r"^(?!passive_|.*neck.*|.*head.*).*",)
     )
-    cfg.rewards["pose"].params["walking_threshold"] = 0.01
-    # ジャンプ時の屈伸（膝曲げ）を阻害しないよう重みを抑制 (1.0 → 0.2)
+    cfg.rewards["pose"].params["walking_threshold"] = 10.0  # 常に std_standing を適用
+    # hip_yaw / hip_roll のねじれ・開脚を抑えつつ、膝・股関節・足首の深い屈伸は許容する
     cfg.rewards["pose"].weight = 0.2
 
     # Body-specific reward configurations
     cfg.rewards["upright"].params["asset_cfg"].body_names = ("trunk_base",)
-    # 直立維持を強化（前傾して頭からダイブするのを防止）
-    cfg.rewards["upright"].weight = 2.0
-    cfg.rewards["upright"].params["std"] = math.sqrt(0.05)
+    # 直立維持報酬: 静止しているだけで大黒字になるのを防ぐため 0.5 に抑制（空中・着地時の姿勢制御用）
+    cfg.rewards["upright"].weight = 0.5
+    cfg.rewards["upright"].params["std"] = math.sqrt(0.15)
 
     for reward_name in ["foot_clearance", "foot_slip"]:
         cfg.rewards[reward_name].params["asset_cfg"].site_names = site_names
 
     cfg.rewards["body_ang_vel"].params["asset_cfg"].body_names = ("trunk_base",)
 
-    cfg.rewards["foot_slip"].weight = -0.1
-    cfg.rewards["foot_slip"].params["command_threshold"] = 0.01
+    # command=0 でも接地中の足滑りを常時抑止するため command_threshold = -1.0 に設定
+    cfg.rewards["foot_slip"].weight = -0.2
+    cfg.rewards["foot_slip"].params["command_threshold"] = -1.0
 
     cfg.rewards.pop("soft_landing", None)
 
@@ -308,47 +300,74 @@ def make_microduck_jump_env_cfg(
         params={"sensor_name": self_collision_cfg.name},
     )
 
-    # 滞空時間報酬: 両足が「同時に」浮いた時だけ報酬を付与（片足ずつの歩行ハックを排除）
+    # 滞空時間報酬: 両足が「同時に」浮いている時間に単位正規化（Unit-scaled）で連続加点
     cfg.rewards["air_time"] = RewardTermCfg(
         func=microduck_mdp.both_feet_air_time,
-        weight=10.0,
+        weight=12.0,
         params={
             "sensor_name": feet_ground_cfg.name,
-            "threshold_min": 0.08,
+            "threshold_min": 0.0,
             "threshold_max": 0.50,
+            "min_com_z": 0.100,
         },
     )
 
-    # 前転モーメント・ピッチ軸回転を強く抑制
-    cfg.rewards["body_ang_vel"].weight = -0.2
-    cfg.rewards["angular_momentum"].weight = -0.05
+    # 跳躍高度報酬: 両足が同時離地している時【限定】で STAND_Z (0.115 m) からの上昇高度を加点
+    cfg.rewards["jump_height"] = RewardTermCfg(
+        func=microduck_mdp.both_feet_jump_height,
+        weight=15.0,
+        params={
+            "sensor_name": feet_ground_cfg.name,
+            "stand_height": STAND_Z,
+            "ref_lift": 0.03,
+        },
+    )
 
-    # 水平移動（前進・歩行・助走）を厳しく禁止（垂直Z速度はペナルティ対象外）
+    # 片足浮きペナルティ: 足踏み・片足ホップ・左右バラバラの離着地を直接抑制（両足接地 or 両足同時滞空なら 0）
+    cfg.rewards["single_foot_air"] = RewardTermCfg(
+        func=microduck_mdp.single_foot_air_cost,
+        weight=-1.5,
+        params={"sensor_name": feet_ground_cfg.name},
+    )
+
+    # 転倒・潰れ終了への即時ペナルティ（1回大きく飛んで着地崩壊するカミカゼ特攻ハックを防止）
+    cfg.rewards["termination_penalty"] = RewardTermCfg(
+        func=mdp.is_terminated,
+        weight=-80.0,
+    )
+
+    # 飛び立ちや空中の姿勢ブレを許容（過度なペナルティで静止が勝つのを防止）
+    cfg.rewards["body_ang_vel"].weight = -0.05
+    cfg.rewards["angular_momentum"].weight = -0.01
+
+    # 水平移動（歩行・助走・前後滑り）のペナルティ
     cfg.rewards["base_xy_vel_penalty"] = RewardTermCfg(
         func=microduck_mdp.base_xy_velocity_penalty,
-        weight=-2.0,
+        weight=-1.0,
     )
 
     # Velocity tracking rewards
     cfg.rewards["track_linear_velocity"].weight = 0.0
     cfg.rewards["track_linear_velocity"].params["std"] = math.sqrt(0.2)
-    # 静止で毎ステップ +2.0 稼ぐハッキングを防ぐため重みを抑制 (2.0 → 0.2)
-    cfg.rewards["track_angular_velocity"].weight = 0.2
+    # 静止で毎ステップ稼ぐのを防ぐため重みを極小化 (0.2 → 0.05)
+    cfg.rewards["track_angular_velocity"].weight = 0.05
     cfg.rewards["track_angular_velocity"].params["std"] = math.sqrt(0.5)
 
-    # Action smoothness — 高速屈伸・小刻みなピストン振動を抑制するため強化 (-0.1 → -0.2)
-    cfg.rewards["action_rate_l2"].weight = -0.2
+    # Action smoothness — 初期探索時は極めて軽く開始し、ジャンプ習得後にカリキュラムで徐々に引き締める
+    cfg.rewards["action_rate_l2"].weight = -0.01
 
-    # 歩行専用の足スイング報酬はジャンプ動作を阻害するため無効化
+    # 歩行専用の足スイング報酬は無効化
     cfg.rewards["foot_clearance"].weight = 0.0
     cfg.rewards["foot_swing_height"].weight = 0.0
 
-    # Z軸（垂直上方向）への初動ブートストラップ補助（高速屈伸ハックを防ぐため重みを 5.0 → 1.0 に抑制）
+    # Z軸（垂直上方向）への蹴り出しブートストラップ（0.108m以上の伸び上がり区間のみ加点し、床での高速屈伸ハックを封じる）
     cfg.rewards["base_lin_vel_z"] = RewardTermCfg(
-        func=microduck_mdp.com_upward_velocity,
-        weight=1.0,
+        func=microduck_mdp.jump_takeoff_velocity,
+        weight=3.0,
         params={
-            "max_height": 0.20,
+            "min_height": 0.108,
+            "max_height": 0.175,
+            "max_vz": 1.2,
         },
     )
 
@@ -382,14 +401,19 @@ def make_microduck_jump_env_cfg(
         time_out=False,
         params={"sensor_names": (feet_ground_cfg.name,)},
     )
-    # 40°以上の傾き・転倒で即座にエピソード終了（顔面ダイブを未然に防ぐ）
-    cfg.terminations["fell_over"].params["limit_angle"] = math.radians(40.0)
+    # 45°以上の傾き・転倒で即座にエピソード終了
+    cfg.terminations["fell_over"].params["limit_angle"] = math.radians(45.0)
+    # robot_walk.xml は足裏のみ衝突判定を持つため、胴体が 6.5cm 未満まで潰れたら即リセット（床貫通・座り込み防止）
+    cfg.terminations["base_too_low"] = TerminationTermCfg(
+        func=mdp.root_height_below_minimum,
+        time_out=False,
+        params={"minimum_height": 0.065},
+    )
 
     cfg.events["reset_base"].params["pose_range"]["z"] = (0.12, 0.13)
 
-    # Velocity-based pushes for robustness training
+    # Velocity-based pushes: ENABLE_VELOCITY_PUSHES=False の時はベース環境の巨大外乱 push_robot を必ず削除する！
     if ENABLE_VELOCITY_PUSHES:
-        # In play mode, use shorter interval for better visibility
         interval = (0.5, 1.0) if play else VELOCITY_PUSH_INTERVAL_S
 
         cfg.events["push_robot"] = EventTermCfg(
@@ -404,6 +428,8 @@ def make_microduck_jump_env_cfg(
                 "asset_cfg": SceneEntityCfg("robot"),
             },
         )
+    else:
+        cfg.events.pop("push_robot", None)
 
     # Domain randomization — re-sampled per episode at reset. In mjlab 1.3.0 the
     # stock dr.* ops with operation="add"/"scale" read from the compile-time
@@ -634,47 +660,39 @@ def make_microduck_jump_env_cfg(
     else:
         cfg.events.pop("encoder_bias", None)
 
-    # Commands — deepcopy to avoid shared-state corruption from other env cfgs
-    # (make_velocity_env_cfg() returns objects with shared mutable references;
-    # standup/ground_pick envs mutate commands["twist"] in place, zeroing ranges)
+    # Commands — deepcopy to avoid shared-state corruption from other env cfgs.
+    # AGENTS.md invariant: keep 50% exact-zero idle command + 50% tiny non-zero noise
+    # so obs[48:51] normalizer std never collapses to eps while idle [0,0,0] is trained.
     command: UniformVelocityCommandCfg = deepcopy(cfg.commands["twist"])
-    command.rel_standing_envs = 0.0
+    command.heading_command = False
+    command.ranges.heading = None
+    command.rel_standing_envs = 0.5
     command.rel_heading_envs = 0.0
-    command.rel_forward_envs = 0.0   # 前進強制上書きバグを根絶（青矢印の原因）
-    command.ranges.lin_vel_x = (0.0, 0.0)
-    command.ranges.lin_vel_y = (0.0, 0.0)
-    command.ranges.ang_vel_z = (0.0, 0.0)
-    command.debug_vis = False        # 前進青矢印の描画をOFF
+    command.rel_forward_envs = -1.0  # r.uniform_(0,1) <= -1.0 が常にFalseになり前進上書き・青矢印を完全根絶
+    command.ranges.lin_vel_x = (-0.01, 0.01)
+    command.ranges.lin_vel_y = (-0.01, 0.01)
+    command.ranges.ang_vel_z = (-0.02, 0.02)
+    command.debug_vis = False
     command.viz.z_offset = 0.0
     cfg.commands["twist"] = microduck_mdp.VelocityCommandCommandOnlyCfg(**vars(command))
     cfg.commands["twist"].rel_turn_in_place_envs = 0.0
     cfg.commands["twist"].debug_vis = False
 
-    # Head pose command (4D deltas from HOME, in joint order:
-    #   neck_pitch, head_pitch, head_yaw, head_roll). Tracked as a primary
-    # reward — see "head_pose_tracking" added below. Initial ranges are small
-    # non-zero so input neurons stay alive from step 0; curriculum widens them.
-    # Per-joint final caps reflect each joint's mechanically reachable delta
-    # from HOME (XML limits minus HOME offset, with ~10% safety margin):
-    #   neck_pitch / head_pitch: ±1.10 rad (limit ±π/2 with HOME=±20°)
-    #   head_yaw                : ±1.40 rad (limit ±π/2 with HOME=0)
-    #   head_roll               : ±0.31 rad (limit ±20°)
-    # Initial ranges are small non-zero so input neurons stay alive from step 0.
+    # Head pose command: 280gの頭部をHOME付近に安定保持（微小ノイズ + 50%完全ゼロ）
     cfg.commands["head_pose"] = microduck_mdp.UniformPoseCommandCfg(
         resampling_time_range=HEAD_POSE_CMD_RESAMPLE_S,
+        zero_command_prob=0.5,
         ranges=(
-            (-0.05, 0.05),    # neck_pitch
-            (-0.05, 0.05),    # head_pitch
-            (-0.07, 0.07),    # head_yaw
-            (-0.015, 0.015),  # head_roll (tighter — much smaller mechanical range)
+            (-0.03, 0.03),    # neck_pitch
+            (-0.03, 0.03),    # head_pitch
+            (-0.03, 0.03),    # head_yaw
+            (-0.015, 0.015),  # head_roll
         ),
     )
-    # Body pose command (6D delta from nominal standing: [x, y, z, roll, pitch, yaw]).
-    # Vel env carries this slot for runtime obs-shape parity; tracked at a tiny
-    # weight to keep the input neurons alive but not steer the policy. The
-    # standup env raises the weight + widens the ranges.
+    # Body pose command (6D slot kept alive with tiny ranges + 50% exact zero for 61D ONNX parity)
     cfg.commands["body_pose"] = microduck_mdp.UniformPoseCommandCfg(
         resampling_time_range=BODY_POSE_CMD_RESAMPLE_S,
+        zero_command_prob=0.5,
         ranges=(
             (-0.005, 0.005),  # x (m)
             (-0.005, 0.005),  # y (m)
@@ -698,19 +716,14 @@ def make_microduck_jump_env_cfg(
         )
 
     # === Pose tracking rewards ===
-    # head_pose: primary objective in vel env — the whole point of the rewrite.
-    # std=0.5 with per-joint Gaussian (see head_pose_tracking in mdp.py): at the
-    # full ±1.0 rad command, a non-tracking policy still sees per-joint reward
-    # exp(-(1/0.5)²)=exp(-4)≈0.018 — a small but non-zero gradient — so the
-    # curriculum widening doesn't kill the signal. Final reward is the mean
-    # over 4 joints, so partial tracking is partial reward (no all-or-nothing).
+    # 頭部をHOME付近に穏やかに保つ（旧 weight=2.0 は「棒立ちで+2.0/sの大黒字」になっていたため 0.2 に縮小）
     cfg.rewards["head_pose_tracking"] = RewardTermCfg(
         func=microduck_mdp.head_pose_tracking,
-        weight=2.0,
-        params={"command_name": "head_pose", "std": 0.5},
+        weight=0.2,
+        params={"command_name": "head_pose", "std": 0.4},
     )
     # body_pose: infra kept intact but DISABLED (weight 0) — the obs slot and
-    # command stay alive for envs that raise the weight (standup).
+    # command stay alive for runtime 61D compatibility.
     cfg.rewards["body_pose_tracking"] = RewardTermCfg(
         func=microduck_mdp.body_pose_tracking_6d,
         weight=0.0,
@@ -723,24 +736,6 @@ def make_microduck_jump_env_cfg(
         },
     )
 
-    # Head droop fix (2026-08-20). The head walks pitched ~15° down (measured:
-    # run ww1g2198 head_pose_tracking 1.544/2.0 → 14.6° mean joint error).
-    # DO NOT fix this by tightening head_pose_tracking's std: run 5yay13u4 tried
-    # fine_std=0.1 and the policy stopped walking entirely by iter 300 (air_time
-    # 1.01 → 0.02, peak foot height 15 mm → 2 mm, entropy collapsed 10.9 → 1.9).
-    # An instantaneous tight tolerance taxes walking 0.77/step — 76% of the whole
-    # air_time reward — and is UNESCAPABLE, since a 280 g head (38% of robot
-    # mass) must oscillate while stepping. Standing still scored higher, so it
-    # stood still.
-    # The DC bias, unlike the oscillation, IS escapable (bias the neck command up
-    # to cancel gravity sag), so price only that: L1 on a 1 s EMA of the error.
-    # At the optimum this costs a walking policy nothing.
-    cfg.rewards["head_pose_bias"] = RewardTermCfg(
-        func=microduck_mdp.head_pose_bias_penalty,
-        weight=0.0,  # ramped by the head_pose_bias_weight curriculum below
-        params={"command_name": "head_pose", "tau_s": 1.0},
-    )
-
     # Terrain
     if not rough:
         cfg.scene.terrain.terrain_type = "plane"
@@ -748,192 +743,95 @@ def make_microduck_jump_env_cfg(
     else:
         cfg.scene.terrain.terrain_type = "generator"
         cfg.scene.terrain.terrain_generator = MICRODUCK_ROUGH_TERRAINS_CFG
-
-        # Soften terrain box contacts: adjacent boxes at different heights create
-        # hard edges that destabilise the contact solver and produce NaN forces.
         cfg.scene.spec_fn = _soften_terrain_contacts
-
-        # The velocity env default nconmax=35 is tight for rough terrain: when the
-        # robot falls and multiple body links hit multiple boxes simultaneously,
-        # contacts overflow → some are silently dropped → sudden decompression → NaN.
-        cfg.sim.nconmax = 200   # was 35
-
-        # The velocity env uses only 10 solver iterations (vs the default 100),
-        # which is too few to resolve edge contacts on rough box terrain.
-        # Tripling iterations significantly reduces contact resolution failures
-        # with a modest compute cost on GPU (MJWarp parallelises across envs).
-        cfg.sim.mujoco.iterations = 30    # was 10
-        cfg.sim.mujoco.ls_iterations = 50  # was 20
+        cfg.sim.nconmax = 200
+        cfg.sim.mujoco.iterations = 30
+        cfg.sim.mujoco.ls_iterations = 50
 
         if play:
             cfg.scene.terrain.terrain_generator.curriculum = False
             cfg.scene.terrain.terrain_generator.num_cols = 5
             cfg.scene.terrain.terrain_generator.num_rows = 5
 
-    # action_rate weight ramp: gentle smoothing while the gait bootstraps, then
-    # tighten to -1.0 by iter 1500.
+    # action_rate_l2 カリキュラム:
+    # 旧設定（0iter=-0.10 → 1500iter=-0.30）がジャンプの爆発的蹴り出しを完全に潰していたため、
+    # 初期は -0.01 で自由に跳躍を発見させ、習得後に -0.06 まで穏やかに引き締める。
     cfg.curriculum["action_rate_weight"] = CurriculumTermCfg(
         func=microduck_mdp.reward_weight,
         params={
             "reward_name": "action_rate_l2",
             "weight_stages": [
-                {"step": 0, "weight": -0.1},
-                {"step": 500 * NUM_STEPS_PER_ENV, "weight": -0.15},
-                {"step": 750 * NUM_STEPS_PER_ENV, "weight": -0.20},
-                {"step": 1000 * NUM_STEPS_PER_ENV, "weight": -0.25},
-                {"step": 1250 * NUM_STEPS_PER_ENV, "weight": -0.28},
-                {"step": 1500 * NUM_STEPS_PER_ENV, "weight": -0.30},
+                {"step": 0,                         "weight": -0.01},
+                {"step": 1000 * NUM_STEPS_PER_ENV, "weight": -0.02},
+                {"step": 2000 * NUM_STEPS_PER_ENV, "weight": -0.04},
+                {"step": 3000 * NUM_STEPS_PER_ENV, "weight": -0.06},
             ],
         },
     )
 
-    # Gradually increase standing env fraction after walking is established
-    # cfg.curriculum["standing_envs"] = CurriculumTermCfg(
-    #     func=microduck_mdp.standing_envs_curriculum,
-    #     params={
-    #         "command_name": "twist",
-    #         "standing_stages": [
-    #             {"step": 0,           "rel_standing_envs": 0.02},
-    #             {"step": 500 * 24,    "rel_standing_envs": 0.05},
-    #             {"step": 750 * 24,    "rel_standing_envs": 0.1},
-    #             {"step": 1000 * 24,   "rel_standing_envs": 0.15},
-    #             {"step": 1500 * 24,   "rel_standing_envs": 0.2},
-    #             {"step": 2000 * 24,   "rel_standing_envs": 0.25},
-    #         ],
-    #     },
-    # )
+    # NOTE: 歩行用の head_pose_range カリキュラム（頭を±80°振り回す外乱）および
+    # head_pose_bias_weight はジャンプ中の重心崩壊を招くため意図的に除外する。
 
-    # NOTE: no velocity-command-range curriculum — ranges are fixed (see the
-    # command section above).
-
-    # Head pose command range curriculum — per-joint, scaled to each joint's
-    # reachable delta from HOME (with ~10% margin from XML limits). Same 5-stage
-    # shape as before (5% → 15% → 35% → 65% → 100% of each joint's final cap).
-    # neck/head pitch final ±1.10 rad, head_yaw ±1.40, head_roll ±0.31.
-    cfg.curriculum["head_pose_range"] = CurriculumTermCfg(
-        func=microduck_mdp.pose_command_range_curriculum,
-        params={
-            "command_name": "head_pose",
-            "range_stages": [
-                # step,                ranges = ((neck_pitch), (head_pitch), (head_yaw),  (head_roll))
-                {"step": 0,         "ranges": ((-0.05, 0.05),  (-0.05, 0.05),  (-0.07, 0.07),  (-0.015, 0.015))},
-                {"step": 500 * 24,  "ranges": ((-0.17, 0.17),  (-0.17, 0.17),  (-0.21, 0.21),  (-0.047, 0.047))},
-                {"step": 1000 * 24, "ranges": ((-0.39, 0.39),  (-0.39, 0.39),  (-0.49, 0.49),  (-0.11, 0.11))},
-                {"step": 1500 * 24, "ranges": ((-0.72, 0.72),  (-0.72, 0.72),  (-0.91, 0.91),  (-0.20, 0.20))},
-                {"step": 2000 * 24, "ranges": ((-1.10, 1.10),  (-1.10, 1.10),  (-1.40, 1.40),  (-0.31, 0.31))},
-            ],
-        },
-    )
-
-    # Body pose command range curriculum: stay small in vel env. Standup env
-    # overrides this curriculum with wide ranges + heavy reward weight.
-    cfg.curriculum["body_pose_range"] = CurriculumTermCfg(
-        func=microduck_mdp.pose_command_range_curriculum,
-        params={
-            "command_name": "body_pose",
-            "range_stages": [
-                {"step": 0, "ranges": (
-                    (-0.005, 0.005),  # x (m)
-                    (-0.005, 0.005),  # y (m)
-                    (-0.005, 0.005),  # z (m)
-                    (-0.05, 0.05),    # roll
-                    (-0.05, 0.05),    # pitch
-                    (-0.05, 0.05),    # yaw
-                )},
-            ],
-        },
-    )
-
-    # CoM randomization range curriculum - start small, ramp up
+    # CoM randomization range curriculum
     if ENABLE_COM_RANDOMIZATION:
         cfg.curriculum["com_range"] = CurriculumTermCfg(
             func=microduck_mdp.com_range_curriculum,
             params={
                 "event_name": "randomize_com",
                 "range_stages": [
-                    # Capped at ±15 mm (2026-07 audit): the previous ramp to ±30 mm
-                    # exceeded the foot support polygon (heel is only 20 mm behind
-                    # the ankle) — the randomized CoM could sit entirely outside
-                    # support, forcing a wide/fast hyper-reactive gait and making
-                    # BACKWARD balance untrainable. Regression timeline matched the
-                    # ramp increases: 0.015 → 0.02 → 0.03 as policies got worse.
-                    {"step": 0,          "range": 0.003},
-                    {"step": 500 * 24,  "range": 0.003},
-                    {"step": 1000 * 24,  "range": 0.003},
-                    {"step": 1500 * 24,  "range": 0.003},
+                    {"step": 0,         "range": 0.003},
+                    {"step": 1500 * 24, "range": 0.005},
                 ],
             },
         )
 
-    # Head CoM randomization range curriculum - start small, ramp up
     if ENABLE_HEAD_COM_RANDOMIZATION:
         cfg.curriculum["head_com_range"] = CurriculumTermCfg(
             func=microduck_mdp.com_range_curriculum,
             params={
                 "event_name": "randomize_head_com",
                 "range_stages": [
-                    # Capped at ±10 mm (2026-07 audit — same over-conservatism
-                    # concern as trunk CoM; head is a large lever arm).
-                    {"step": 0,          "range": 0.003},
-                    {"step": 500 * 24,  "range": 0.003},
-                    {"step": 1000 * 24,  "range": 0.003},
+                    {"step": 0,         "range": 0.003},
+                    {"step": 1500 * 24, "range": 0.005},
                 ],
             },
         )
 
-    # Disable default curriculum
+    # Disable default velocity curricula
     if not rough:
         del cfg.curriculum["terrain_levels"]
     del cfg.curriculum["command_vel"]
 
-    # head_pose_bias ramp: OFF until iter 600, then 1.0 → 3.0 by iter 1500.
-    # Held at 0 early because a posture-precision term is a distraction before
-    # a gait exists. At weight 3.0 a 15° residual bias costs 0.79/step and a
-    # 2° bias costs 0.10/step.
-    cfg.curriculum["head_pose_bias_weight"] = CurriculumTermCfg(
-        func=microduck_mdp.reward_weight,
-        params={
-            "reward_name": "head_pose_bias",
-            "weight_stages": [
-                {"step": 0, "weight": 0.0},
-                {"step": 600 * NUM_STEPS_PER_ENV, "weight": 0.1},
-                {"step": 1000 * NUM_STEPS_PER_ENV, "weight": 0.2},
-                {"step": 1500 * NUM_STEPS_PER_ENV, "weight": 0.3},
-            ],
-        },
-    )
-
-    # 学習の進展に合わせて必要滞空時間（threshold_min）を段階的に引き上げ（Microduckの物理限界に即した多段カリキュラム）
+    # 学習の進展に合わせて必要滞空時間のボーナス基準（threshold_min）を段階的に引き上げ
     cfg.curriculum["jump_height_curriculum"] = CurriculumTermCfg(
         func=microduck_mdp.reward_param_curriculum,
         params={
             "reward_name": "air_time",
             "param_name": "threshold_min",
             "stages": [
-                {"step": 0,                         "value": 0.08},  # 0~1000 iter: 0.08s (~0.8cm) 初歩離地
-                {"step": 1000 * NUM_STEPS_PER_ENV, "value": 0.10},  # 1000~2000 iter: 0.10s (~1.2cm) 小ジャンプ
-                {"step": 2000 * NUM_STEPS_PER_ENV, "value": 0.12},  # 2000~3000 iter: 0.12s (~1.8cm) 確実な跳躍
-                {"step": 3000 * NUM_STEPS_PER_ENV, "value": 0.14},  # 3000~4000 iter: 0.14s (~2.4cm) 綺麗なジャンプ
-                {"step": 4000 * NUM_STEPS_PER_ENV, "value": 0.16},  # 4000~5000 iter: 0.16s (~3.1cm) フルジャンプ
+                {"step": 0,                         "value": 0.0},   # 0~1000 iter: 少しでも両足同時離地すれば即加点
+                {"step": 1000 * NUM_STEPS_PER_ENV, "value": 0.04},  # 1000~2000 iter: 0.04s ボーナス
+                {"step": 2000 * NUM_STEPS_PER_ENV, "value": 0.08},  # 2000~3000 iter: 0.08s ボーナス
+                {"step": 3000 * NUM_STEPS_PER_ENV, "value": 0.11},  # 3000~4000 iter: 0.11s ボーナス
+                {"step": 4000 * NUM_STEPS_PER_ENV, "value": 0.14},  # 4000+ iter:     0.14s フルジャンプボーナス
             ],
         },
     )
 
     if play:
         cfg.commands["twist"].debug_vis = False
+        cfg.commands["twist"].rel_standing_envs = 1.0
         cfg.commands["twist"].ranges.lin_vel_x = (0.0, 0.0)
         cfg.commands["twist"].ranges.lin_vel_y = (0.0, 0.0)
         cfg.commands["twist"].ranges.ang_vel_z = (0.0, 0.0)
         cfg.commands["head_pose"].ranges = ((0.0, 0.0),) * 4
         cfg.commands["body_pose"].ranges = ((0.0, 0.0),) * 6
-        cfg.curriculum.pop("head_pose_range", None)
-        cfg.curriculum.pop("body_pose_range", None)
         cfg.curriculum.pop("jump_height_curriculum", None)
 
     return cfg
 
 
-MicroduckRunRlCfg = RslRlOnPolicyRunnerCfg(
+MicroduckJumpRlCfg = RslRlOnPolicyRunnerCfg(
     actor=RslRlModelCfg(
         hidden_dims=(512, 256, 128),
         activation="elu",
@@ -965,8 +863,8 @@ MicroduckRunRlCfg = RslRlOnPolicyRunnerCfg(
         symmetry_cfg=SYMMETRY_CFG if ENABLE_SYMMETRY else None,
     ),
     wandb_project="mjlab_microduck",
-    experiment_name="run",  # Directory name
-    run_name="run",  # Appended to datetime in wandb: <datetime>_velocity
+    experiment_name="jump",
+    run_name="jump",
     save_interval=250,
     num_steps_per_env=24,
     max_iterations=50_000,
