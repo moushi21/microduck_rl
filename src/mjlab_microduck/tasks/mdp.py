@@ -7750,6 +7750,8 @@ def both_feet_air_time(
 
     Prevents single-foot stepping or walking from farming the air_time reward.
     """
+    from mjlab.sensor import ContactSensor
+
     sensor: ContactSensor = env.scene[sensor_name]
     current_air_time = sensor.data.current_air_time
     assert current_air_time is not None
