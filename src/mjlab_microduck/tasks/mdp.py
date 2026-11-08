@@ -1406,9 +1406,11 @@ def forward_speed_reward(
 
     Indépendante de la commande (la commande porte la phase, pas la vitesse).
     tanh(clamp(vx, 0)/vel_ref) → sature à ~1, ne récompense jamais reculer.
+    Uses horizontal yaw-frame forward speed so forward trunk pitch does not
+    reduce measured speed by cos(pitch).
     """
     asset: Entity = env.scene[asset_cfg.name]
-    vx = asset.data.root_link_lin_vel_b[:, 0]
+    vx = _horizontal_lin_vel_yaw(asset)[:, 0]
     return torch.tanh(torch.clamp(vx, min=0.0) / vel_ref)
 
 
@@ -5521,9 +5523,10 @@ def zero_command_padding(
 def head_pose_tracking(
     env: ManagerBasedRlEnv,
     command_name: str = "head_pose",
-    std: float = 0.5,
+    std: float | tuple[float, float, float, float] = 0.5,
     fine_std: float | None = None,
     fine_weight: float = 0.5,
+    default_offset: tuple[float, float, float, float] | None = None,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
     """Per-joint Gaussian reward for matching commanded neck/head deltas.
@@ -5532,9 +5535,14 @@ def head_pose_tracking(
     [0, 1]. Mean form (vs sum-of-squares) keeps gradient alive when only one
     joint is off — vs SOS where a single big error kills the whole reward.
 
-    `std` is the per-joint tolerance: at err=std the per-joint reward is 1/e
-    (~0.37). Pick std on the order of the command range so the gradient
-    doesn't die as the curriculum widens.
+    `std` is the per-joint tolerance (scalar float or 4-tuple for per-joint stds):
+    at err=std the per-joint reward is 1/e (~0.37). Pick std on the order of the
+    command range so the gradient doesn't die as the curriculum widens.
+
+    `default_offset` (optional 4-tuple): static delta added to `cmd` in
+    [neck_pitch, head_pitch, head_yaw, head_roll] order so tasks like sprinting
+    can bias the nominal zero-command posture (e.g. slight chin-down forward neck
+    lean) without altering the runtime's zero-command contract.
 
     `fine_std` (optional) blends in a second, narrow Gaussian:
     (1-fine_weight)·exp(-(err/std)²) + fine_weight·exp(-(err/fine_std)²).
@@ -5576,13 +5584,127 @@ def head_pose_tracking(
         + joint_pos[:, env._head_pose_bl_ids] * env._head_pose_bl_mask
     )
     actual = measured - asset.data.default_joint_pos[:, neck_ids]
-    err = actual - cmd
-    per_joint = torch.exp(-(err / std) ** 2)
+    target = cmd
+    if default_offset is not None:
+        offset_t = torch.tensor(default_offset, device=env.device, dtype=actual.dtype)
+        target = cmd + offset_t.unsqueeze(0)
+    err = actual - target
+    if isinstance(std, (tuple, list)):
+        std_t = torch.tensor(std, device=env.device, dtype=actual.dtype).unsqueeze(0)
+        per_joint = torch.exp(-torch.square(err / std_t))
+    else:
+        per_joint = torch.exp(-(err / std) ** 2)
     if fine_std is not None:
         per_joint = (1.0 - fine_weight) * per_joint + fine_weight * torch.exp(
             -(err / fine_std) ** 2
         )
     return per_joint.mean(dim=-1)
+
+
+def sprint_lean_upright_reward(
+    env: ManagerBasedRlEnv,
+    command_name: str = "twist",
+    target_pitch: float = 0.25,
+    pitch_std: float = 0.15,
+    roll_std: float = 0.12,
+    command_threshold: float = 0.05,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot", body_names=("trunk_base",)),
+) -> torch.Tensor:
+    """Upright orientation reward centered on a target forward sprint lean.
+
+    Replaces the conflicting level-upright (target pitch 0) + forward_lean pair
+    so the policy is not pulled back to vertical while sprinting:
+      - When cmd_x > command_threshold, target projected_gravity_b[:, 0] is
+        target_pitch (positive = nose-down forward lean, e.g. 0.25 rad ≈ 14.3°).
+      - Roll (projected_gravity_b[:, 1]) is anchored strictly at 0.0 with a tight
+        roll_std to keep the trunk laterally level.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    g_b = torch.nan_to_num(asset.data.projected_gravity_b, nan=0.0)
+    cmd_x = env.command_manager.get_command(command_name)[:, 0]
+    moving = (cmd_x > command_threshold).float()
+    p_target = moving * target_pitch
+    pitch_err_sq = torch.square((g_b[:, 0] - p_target) / pitch_std)
+    roll_err_sq = torch.square(g_b[:, 1] / roll_std)
+    return torch.exp(-(pitch_err_sq + roll_err_sq))
+
+
+def _horizontal_lin_vel_yaw(asset: Entity) -> torch.Tensor:
+    """Return horizontal (vx, vy) in the robot's yaw-aligned world frame (shape [B, 2]).
+
+    Unlike ``root_link_lin_vel_b[:, :2]``, this projection depends ONLY on yaw
+    and is invariant to trunk pitch and roll. When the robot leans forward by
+    15–25° during a sprint, horizontal world velocity does not leak into body-z
+    or shrink by cos(pitch).
+    """
+    if hasattr(asset.data, "root_link_lin_vel_w") and hasattr(
+        asset.data, "root_link_quat_w"
+    ):
+        v_w = torch.nan_to_num(asset.data.root_link_lin_vel_w, nan=0.0)
+        q = torch.nan_to_num(asset.data.root_link_quat_w, nan=0.0)
+        w, x, y, z = q[:, 0], q[:, 1], q[:, 2], q[:, 3]
+        yaw = torch.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+        cy = torch.cos(yaw)
+        sy = torch.sin(yaw)
+        vx_yaw = cy * v_w[:, 0] + sy * v_w[:, 1]
+        vy_yaw = -sy * v_w[:, 0] + cy * v_w[:, 1]
+        return torch.stack([vx_yaw, vy_yaw], dim=1)
+    return torch.nan_to_num(asset.data.root_link_lin_vel_b[:, :2], nan=0.0)
+
+
+def track_horizontal_linear_velocity(
+    env: ManagerBasedRlEnv,
+    std: float,
+    command_name: str = "twist",
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Track commanded (vx, vy) in the horizontal yaw plane without penalizing vz or forward pitch.
+
+    Why (sprint physics fix): mjlab's stock ``track_linear_velocity`` reads
+    ``root_link_lin_vel_b`` (3D tilted body frame) AND adds ``z_error = actual[:, 2]²``.
+    When a biped leans forward by θ (e.g. 0.25–0.35 rad) at horizontal speed v,
+    ``v_b,z = v·sin(θ)`` (up to 0.34 m/s at 1.0 m/s), and bounding into a running
+    flight phase produces vertical oscillation ``v_w,z != 0``. Stock
+    ``track_linear_velocity`` heavily penalizes both via ``z_error``, forcing the
+    policy into an upright (θ≈0), flat-CoM race-walk ("早歩き"). Tracking
+    horizontal yaw-frame ``(vx_yaw, vy_yaw)`` removes both artificial penalties.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    command = env.command_manager.get_command(command_name)
+    v_yaw_xy = _horizontal_lin_vel_yaw(asset)
+    xy_error = torch.sum(torch.square(command[:, :2] - v_yaw_xy), dim=1)
+    return torch.exp(-xy_error / (std ** 2))
+
+
+def flight_phase_reward(
+    env: ManagerBasedRlEnv,
+    sensor_name: str = "feet_ground_contact",
+    command_name: str = "twist",
+    vel_ref: float = 0.50,
+    command_threshold: float = 0.05,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Reward true running flight phase (BOTH feet simultaneously airborne) gated by forward speed.
+
+    Walking always keeps at least one foot on the ground (duty factor >= 0.5);
+    running is physically defined by an aerial bound where both feet are off the
+    ground (`min(current_air_time) > 0`). Multiplied by ``clamp(vx_yaw / vel_ref, 0, 1)``
+    so hopping in place earns strictly 0 — only forward-travelling aerial bounds pay.
+    """
+    from mjlab.sensor import ContactSensor
+
+    sensor: ContactSensor = env.scene[sensor_name]
+    current_air_time = sensor.data.current_air_time
+    assert current_air_time is not None
+    both_airborne = (torch.min(current_air_time, dim=1).values > 0.0).float()
+
+    asset: Entity = env.scene[asset_cfg.name]
+    vx_yaw = _horizontal_lin_vel_yaw(asset)[:, 0]
+    speed_gate = torch.clamp(vx_yaw / max(vel_ref, 1e-3), min=0.0, max=1.0)
+
+    cmd_x = env.command_manager.get_command(command_name)[:, 0]
+    cmd_gate = (cmd_x > command_threshold).float()
+    return both_airborne * speed_gate * cmd_gate
 
 
 # ─────────────────────────────────────────────────────────────────────────────

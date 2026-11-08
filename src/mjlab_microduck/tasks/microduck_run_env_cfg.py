@@ -1,42 +1,61 @@
 """Microduck straight-line running environment (Mjlab-Run-Flat-MicroDuck).
 
-High-speed straight-line forward running up to 0.8 m/s (~3.2 body lengths/s,
-Froude number Fr ≈ 0.50) trained from scratch on flat terrain, registered both
+High-speed straight-line forward running up to 1.0 m/s (~4.0 body lengths/s,
+Froude number Fr ≈ 0.78) trained from scratch on flat terrain, registered both
 as ``Mjlab-Run-Flat-MicroDuck`` (``robot_walk.xml``) and its ±1° serial-play
 backlash twin ``Mjlab-Run-Flat-Backlash-MicroDuck`` (``robot_walk_backlash.xml``,
 preserving the shared 61D actor observation and 14D action contract):
 
-  - **Stride & joint coordination (腰・膝・足首の蹴り方と歩幅)**: speed-staged
-    ``pose`` tolerances keep ``hip_yaw`` (0.08) and ``hip_roll`` (0.05) tightly
-    aligned along the sagittal plane to prevent leg splay, while opening
-    ``hip_pitch`` (0.45 -> 0.60), ``knee`` (0.50 -> 0.65), and ``ankle``
-    (0.35 -> 0.45) above ``running_threshold = 0.45 m/s`` for long strides,
-    low-inertia swing knee flexion, and strong ankle plantarflexion push-off.
-  - **Controlled forward lean (前傾姿勢)**: ``forward_lean_reward`` encourages a
-    ~7° (0.12 rad) forward trunk pitch proportional to forward speed command,
-    while a relaxed ``upright`` Gaussian (``std = sqrt(0.25)``) avoids taxing
-    natural sprint lean yet still guards against face-plant falls.
-  - **Dynamic head counter-balancing (頭部の振り幅・腕の代わり)**: the 280 g head
-    (38% of total mass) acts as the robot's sole angular-momentum counterweight
-    in the absence of arms. ``head_pose`` commands stay near HOME with light
-    tracking (``weight = 0.3, std = 0.6``) and no off-axis widening curriculum,
-    leaving the neck/head free to oscillate in counter-phase with leg swings.
-  - **Straight-line symmetry & heading hold (直進特化)**: bilateral PPO mirror
-    loss (``ENABLE_SYMMETRY = True``), cumulative ``gait_symmetry_penalty`` on
-    left/right swing duration, and angle-based ``heading_hold_reward`` against
-    spawn yaw eliminate one-legged propulsion and open-loop lateral drift.
-  - **5-stage from-scratch curriculum**: co-schedules forward velocity windows
-    ``[0.15, 0.35] -> [0.30, 0.50] -> [0.45, 0.65] -> [0.60, 0.80] -> [0.75, 0.80]``,
-    minimum stride air-time ``0.04 -> 0.12 s``, and post-discovery action-rate
-    smoothing ``-0.02 -> -0.10``.
+  - **Stride & 3D hip coordination (腰・膝・足首の蹴り方と歩幅 + 振り上げ足内旋・蹴り足外旋)**:
+    speed-staged ``pose`` tolerances (light weight ``0.25``) keep ``std_standing``
+    tight, then progressively open **both** sagittal joints (``hip_pitch`` 0.55 -> 0.75,
+    ``knee`` 0.60 -> 0.80, ``ankle`` 0.45 -> 0.55) **and** 3D hip rotation
+    (``hip_yaw`` 0.25 -> 0.35, ``hip_roll`` 0.12 -> 0.18) above
+    ``running_threshold = 0.45 m/s``. This allows the forward-swinging foot to
+    rotate slightly inward toward the CoM midline (reducing lateral waddle) and
+    the rear push-off foot to rotate slightly outward (sprinter/skater-style 3D
+    hip extension combining ``hip_pitch + hip_yaw + hip_roll``).
+  - **Pronounced forward sprint lean (前傾姿勢)**: both ``upright``
+    (``sprint_lean_upright_reward``) and ``forward_lean`` target a unified
+    ``TARGET_FORWARD_LEAN_RAD = 0.30 rad`` (~17.2° nose-down trunk pitch) when
+    moving forward, eliminating the pull toward vertical 0° pitch that caused
+    upright fast-walking.
+  - **Deep forward neck extension & anti-head-whip (首を前に倒す前傾重心・首振り抑制・顔面下向き)**:
+    At ``HOME_FRAME``, ``neck_pitch = +0.35 rad (+20°)`` is tilted backward over the
+    rear battery. ``head_pose_tracking`` (``weight = 2.0``) shifts the nominal target by
+    ``SPRINT_HEAD_OFFSET = (-0.75, -0.50, 0.0, 0.0)`` so the 5 cm neck link pitches
+    deeply forward (``neck_pitch ≈ -0.40 rad = -23°`` in trunk frame, ~-40° in world
+    frame, shifting the 280 g head CoM >3.5 cm forward ahead of the hips) while
+    ``head_pitch`` compensates so the face points ~14.3° downward relative to the
+    trunk (~31° downward in world frame). Paired with tight yaw/roll stds
+    ``(0.18, 0.18, 0.08, 0.08)`` and ``neck_joint_vel_l2`` (``weight = -0.08``) to
+    suppress step-by-step lateral head whipping.
+  - **Pitch- & bounce-free horizontal velocity tracking + aerial flight phase**:
+    Replaces stock ``mdp.track_linear_velocity`` (which reads 3D tilted body-frame
+    velocity and penalizes ``v_b,z²``, punishing both forward trunk pitch
+    ``v_b,z = v_x·sin(θ)`` and vertical flight-phase bounce) with
+    ``track_horizontal_linear_velocity`` in the horizontal yaw plane, paired with
+    ``flight_phase_reward`` (rewarding both feet simultaneously airborne at speed)
+    and a high 3.5 cm swing-foot target height (folding the swing knee to minimize
+    leg rotational inertia ``I = m·r²``).
+  - **Clean viewer**: blue velocity command arrow is hidden (``debug_vis = False``).
 """
 
 import math
 from copy import deepcopy
 
 NUM_STEPS_PER_ENV = 24
-MAX_RUN_SPEED = 0.80  # Target sprint velocity (m/s)
-TARGET_FORWARD_LEAN_RAD = 0.12  # ~6.9° forward trunk pitch during sprint
+MAX_RUN_SPEED = 1.00  # Target top sprint velocity (m/s)
+TARGET_FORWARD_LEAN_RAD = 0.30  # ~17.2° forward trunk pitch during sprint
+# Nominal head delta from HOME [neck_pitch, head_pitch, head_yaw, head_roll]:
+# At HOME, neck_pitch=+0.349 rad (+20° tilted backward) and head_pitch=+0.349 rad.
+# Delta (-0.75, -0.50, 0.0, 0.0) pitches the 5 cm neck link deeply forward to
+# -0.40 rad (-23° in trunk frame, shifting the 280 g head CoM ~3.6 cm forward as
+# seen in Microduck Arena 2M Sprint), while lifting head_pitch relative to the
+# neck so net head pitch in trunk frame is (-0.50) - (-0.75) = +0.25 rad (+14.3°
+# nose-down relative to trunk, ~28.6° downward in world frame during sprint).
+SPRINT_HEAD_OFFSET = (-0.75, -0.50, 0.0, 0.0)
+SPRINT_HEAD_STD = (0.18, 0.18, 0.08, 0.08)
 
 # Straight-line running task — zero turn-in-place fraction.
 TURN_IN_PLACE_FRACTION = 0.0
@@ -184,7 +203,7 @@ def make_microduck_run_env_cfg(
 
     std_standing = {
         # Tight posture when standing idle (command < walking_threshold)
-        r".*hip_yaw.*": 0.08,
+        r".*hip_yaw.*": 0.06,
         r".*hip_roll.*": 0.05,  # Hold the 5°-inward stance (sole sits flat), stop leg splay
         r".*hip_pitch.*": 0.15,
         r".*knee.*": 0.15,
@@ -192,26 +211,27 @@ def make_microduck_run_env_cfg(
     }
 
     std_walking = {
-        # Stage 0–1 moderate speed regime (0.05 <= speed < 0.45 m/s):
-        # keep hip_yaw/hip_roll tightly constrained for straight-line tracking
-        # while opening sagittal joints for longer strides.
-        r".*hip_yaw.*": 0.08,
-        r".*hip_roll.*": 0.05,
-        r".*hip_pitch.*": 0.45,
-        r".*knee.*": 0.50,
-        r".*ankle.*": 0.35,
+        # Stage 0 moderate speed regime (0.05 <= speed < 0.45 m/s):
+        # open sagittal joints for longer strides and allow moderate hip_yaw/hip_roll
+        # rotation so the swing foot can angle toward the CoM midline.
+        r".*hip_yaw.*": 0.25,
+        r".*hip_roll.*": 0.12,
+        r".*hip_pitch.*": 0.55,
+        r".*knee.*": 0.60,
+        r".*ankle.*": 0.45,
     }
 
     std_running = {
-        # Stage 2–4 sprint regime (speed >= 0.45 m/s):
+        # Stage 1–4 sprint regime (speed >= 0.45 m/s):
         # wide sagittal freedom for high-cadence stride extension, swing knee
-        # folding (lower leg rotational inertia), and strong ankle plantarflexion
-        # push-off into the flight phase.
-        r".*hip_yaw.*": 0.08,
-        r".*hip_roll.*": 0.05,
-        r".*hip_pitch.*": 0.60,
-        r".*knee.*": 0.65,
-        r".*ankle.*": 0.45,
+        # folding, and ankle push-off, PLUS 3D hip rotation (hip_yaw=0.35, hip_roll=0.18)
+        # so the forward swing foot turns slightly inward toward the midline and
+        # the rear push-off foot turns outward (Microduck Arena 2M Sprint style).
+        r".*hip_yaw.*": 0.35,
+        r".*hip_roll.*": 0.18,
+        r".*hip_pitch.*": 0.75,
+        r".*knee.*": 0.80,
+        r".*ankle.*": 0.55,
     }
 
     site_names = ["left_foot", "right_foot"]
@@ -272,8 +292,8 @@ def make_microduck_run_env_cfg(
     joint_pos_action.scale = 1.0
 
     # === REWARDS ===
-    # Pose reward: operates on LEG joints only; automatically transitions from
-    # std_walking to std_running once commanded speed reaches 0.45 m/s.
+    # Pose reward: light weight (0.25) so HOME does not pull the robot back to an
+    # upright standing stance; keeps hip_yaw/hip_roll tight while freeing sagittal joints.
     cfg.rewards["pose"].params["std_standing"] = std_standing
     cfg.rewards["pose"].params["std_walking"] = std_walking
     cfg.rewards["pose"].params["std_running"] = std_running
@@ -282,19 +302,29 @@ def make_microduck_run_env_cfg(
     )
     cfg.rewards["pose"].params["walking_threshold"] = 0.05
     cfg.rewards["pose"].params["running_threshold"] = 0.45
-    cfg.rewards["pose"].weight = 0.6
+    cfg.rewards["pose"].weight = 0.25
 
-    # Upright orientation: relaxed std (sqrt(0.25) = 0.5) so a ~7–10° forward
-    # sprint lean is not penalized while still preventing catastrophic pitch/roll collapse.
-    cfg.rewards["upright"].params["asset_cfg"].body_names = ("trunk_base",)
-    cfg.rewards["upright"].weight = 0.8
-    cfg.rewards["upright"].params["std"] = math.sqrt(0.25)
+    # Sprint-lean upright orientation: centers the pitch target at TARGET_FORWARD_LEAN_RAD
+    # (0.25 rad ≈ 14.3° nose-down) when moving forward while keeping roll strictly level (0.0).
+    # Eliminates the pull toward 0° vertical pitch that previously suppressed forward lean.
+    cfg.rewards["upright"] = RewardTermCfg(
+        func=microduck_mdp.sprint_lean_upright_reward,
+        weight=1.5,
+        params={
+            "command_name": "twist",
+            "target_pitch": TARGET_FORWARD_LEAN_RAD,
+            "pitch_std": 0.15,
+            "roll_std": 0.12,
+            "command_threshold": 0.05,
+            "asset_cfg": SceneEntityCfg("robot", body_names=("trunk_base",)),
+        },
+    )
 
-    # Forward lean reward: encourages a controlled ~7° (0.12 rad) forward trunk pitch
-    # proportional to forward velocity command so the CoM leads the support foot.
+    # Forward lean reward: reinforces the same ~14.3° (0.25 rad) forward trunk pitch
+    # proportional to commanded sprint speed so the CoM stays well ahead of stance push-off.
     cfg.rewards["forward_lean"] = RewardTermCfg(
         func=microduck_mdp.forward_lean_reward,
-        weight=1.0,
+        weight=1.5,
         params={
             "command_name": "twist",
             "target_pitch": TARGET_FORWARD_LEAN_RAD,
@@ -307,7 +337,15 @@ def make_microduck_run_env_cfg(
     cfg.rewards["heading_hold"] = RewardTermCfg(
         func=microduck_mdp.heading_hold_reward,
         weight=1.5,
-        params={"std": 0.35, "asset_cfg": SceneEntityCfg("robot")},
+        params={"std": 0.30, "asset_cfg": SceneEntityCfg("robot")},
+    )
+
+    # Neck angular-velocity damping: directly penalizes step-by-step lateral head
+    # whipping (neck_pitch, head_pitch, head_yaw, head_roll velocities) so the 280 g
+    # head stays steady and does not yank the trunk off course.
+    cfg.rewards["neck_vel"] = RewardTermCfg(
+        func=microduck_mdp.neck_joint_vel_l2,
+        weight=-0.08,
     )
 
     # Foot-specific configurations
@@ -337,39 +375,71 @@ def make_microduck_run_env_cfg(
         params={"sensor_name": feet_ground_cfg.name},
     )
 
-    # Terminal fall penalty: prevents kamikaze forward dives that trade a brief
-    # velocity spike for an unrecoverable face-plant.
+    # Terminal fall penalty: moderate (-10.0, not -50.0) so the policy is not
+    # terrified of leaning aggressively forward during sprint acceleration.
     cfg.rewards["termination_penalty"] = RewardTermCfg(
         func=mdp.is_terminated,
-        weight=-50.0,
+        weight=-10.0,
     )
 
-    # Stride air-time reward: starts at threshold_min = 0.04 s for Stage 0 bootstrap
-    # and ramps to 0.12 s via air_time_threshold curriculum as sprint speed increases.
-    cfg.rewards["air_time"].weight = 3.0
+    # Stride air-time reward: keep threshold_min fixed at 0.025 s (~1 step) so
+    # high stride frequency f is NEVER penalized by the -f*t_min dead-zone loss.
+    cfg.rewards["air_time"].weight = 1.5
     cfg.rewards["air_time"].params["command_threshold"] = 0.05
-    cfg.rewards["air_time"].params["threshold_min"] = 0.04
-    cfg.rewards["air_time"].params["threshold_max"] = 0.300
+    cfg.rewards["air_time"].params["threshold_min"] = 0.025
+    cfg.rewards["air_time"].params["threshold_max"] = 0.220
+
+    # Aerial flight phase reward: directly rewards BOTH feet simultaneously
+    # airborne while travelling forward at speed (the physical definition of
+    # running vs race-walking, as seen in Microduck Arena 2M Sprint).
+    cfg.rewards["flight_phase"] = RewardTermCfg(
+        func=microduck_mdp.flight_phase_reward,
+        weight=0.5,
+        params={
+            "sensor_name": feet_ground_cfg.name,
+            "command_name": "twist",
+            "vel_ref": 0.50,
+            "command_threshold": 0.05,
+        },
+    )
 
     cfg.rewards["body_ang_vel"].weight = -0.05
     cfg.rewards["angular_momentum"].weight = -0.02
 
-    # Primary velocity tracking rewards
-    cfg.rewards["track_linear_velocity"].weight = 4.0
-    cfg.rewards["track_linear_velocity"].params["std"] = math.sqrt(0.2)
+    # Primary velocity tracking rewards:
+    # - Uses track_horizontal_linear_velocity in the yaw-aligned horizontal plane
+    #   so neither forward trunk lean (v_b,z = v_x*sin(pitch)) nor vertical
+    #   flight-phase bounce (v_w,z != 0) is penalized as z_error!
+    # - Keeps track_angular_velocity std at sqrt(0.5) so its internal roll/pitch
+    #   rate term does not choke dynamic sagittal push-off pitch oscillation.
+    cfg.rewards["track_linear_velocity"] = RewardTermCfg(
+        func=microduck_mdp.track_horizontal_linear_velocity,
+        weight=5.0,
+        params={"command_name": "twist", "std": math.sqrt(0.08)},
+    )
     cfg.rewards["track_angular_velocity"].weight = 2.0
-    cfg.rewards["track_angular_velocity"].params["std"] = math.sqrt(0.25)
+    cfg.rewards["track_angular_velocity"].params["std"] = math.sqrt(0.50)
+
+    cfg.rewards["forward_speed"] = RewardTermCfg(
+        func=microduck_mdp.forward_speed_reward,
+        weight=2.0,
+        params={"vel_ref": 0.80},
+    )
 
     # Action smoothness: starts light (-0.02) so explosive push-off discovery is
     # untaxed in Stage 0, then ramps to -0.10 by iter 4800 via curriculum.
     cfg.rewards["action_rate_l2"].weight = -0.02
 
-    # Foot clearance & swing height: 1.5 cm target prevents foot dragging during fast recovery swings.
+    # Foot clearance & swing height: 3.5 cm target height (with softened -0.5
+    # clearance weight) encourages high knee-folding during the forward recovery
+    # swing (reducing leg rotational moment of inertia I = m*r^2 as seen in Arena
+    # 2M Sprint) instead of penalizing foot lift above 1.5 cm.
+    cfg.rewards["foot_clearance"].weight = -0.5
     cfg.rewards["foot_clearance"].params["command_threshold"] = 0.05
-    cfg.rewards["foot_clearance"].params["target_height"] = 0.015
+    cfg.rewards["foot_clearance"].params["target_height"] = 0.035
 
     cfg.rewards["foot_swing_height"].params["command_threshold"] = 0.05
-    cfg.rewards["foot_swing_height"].params["target_height"] = 0.015
+    cfg.rewards["foot_swing_height"].params["target_height"] = 0.035
 
     # === EVENTS ===
     # BAM writes per-env dof_frictionloss/dof_damping every step; register for per-world expansion.
@@ -394,7 +464,8 @@ def make_microduck_run_env_cfg(
         time_out=False,
         params={"sensor_names": (feet_ground_cfg.name,)},
     )
-    cfg.terminations["fell_over"].params["limit_angle"] = math.radians(45.0)
+    # 60° tilt limit allows deep forward sprint acceleration drive without premature reset.
+    cfg.terminations["fell_over"].params["limit_angle"] = math.radians(60.0)
     # robot_walk.xml only has foot collision geoms; terminate if the trunk collapses below 6.5 cm.
     cfg.terminations["base_too_low"] = TerminationTermCfg(
         func=mdp.root_height_below_minimum,
@@ -601,26 +672,29 @@ def make_microduck_run_env_cfg(
 
     # === COMMANDS ===
     # Straight-line forward velocity command:
-    # - Stage 0 starts at lin_vel_x = (0.15, 0.35) and ramps to (0.75, 0.80) via curriculum.
+    # - Stage 0 starts at lin_vel_x = (0.30, 0.50) and ramps to (0.90, 1.00) via curriculum.
     # - rel_forward_envs = 0.5 zeroes vy/wz on half the envs (pure straight-line command)
     #   while the other half samples tiny non-zero vy/wz noise so obs[49:51] normalizer
     #   std never collapses to eps.
+    # - debug_vis = False hides the blue command arrow in the viewer.
     command: UniformVelocityCommandCfg = deepcopy(cfg.commands["twist"])
     command.heading_command = False
     command.ranges.heading = None
     command.rel_standing_envs = 0.02
     command.rel_heading_envs = 0.0
     command.rel_forward_envs = 0.5
-    command.ranges.lin_vel_x = (0.15, 0.35)
+    command.ranges.lin_vel_x = (0.30, 0.50)
     command.ranges.lin_vel_y = (-0.01, 0.01)
     command.ranges.ang_vel_z = (-0.02, 0.02)
-    command.viz.z_offset = 0.2
+    command.debug_vis = False
+    command.viz.z_offset = 0.0
     cfg.commands["twist"] = microduck_mdp.VelocityCommandCommandOnlyCfg(**vars(command))
     cfg.commands["twist"].rel_turn_in_place_envs = TURN_IN_PLACE_FRACTION
+    cfg.commands["twist"].debug_vis = False
 
-    # Head pose command: keep nominal near HOME (50% exact zero + tiny range for normalizer std).
-    # No head_pose_range widening curriculum — the 280 g head must stay centered and free
-    # to act as a dynamic counter-balance during sprinting.
+    # Head pose command: keep nominal command near zero (50% exact zero + tiny range for normalizer std).
+    # SPRINT_HEAD_OFFSET in head_pose_tracking biases the physical target to a slight chin-down
+    # forward neck lean while keeping head_yaw and head_roll locked straight ahead.
     cfg.commands["head_pose"] = microduck_mdp.UniformPoseCommandCfg(
         resampling_time_range=HEAD_POSE_CMD_RESAMPLE_S,
         zero_command_prob=0.5,
@@ -658,12 +732,16 @@ def make_microduck_run_env_cfg(
         )
 
     # === Pose tracking rewards ===
-    # Light head tracking (weight=0.3, std=0.6): keeps mean head orientation forward
-    # while allowing natural counter-phase head oscillation to cancel leg angular momentum.
+    # Strong head stabilization (weight=2.0) around SPRINT_HEAD_OFFSET=(-0.15, 0.10, 0.0, 0.0)
+    # with tight yaw/roll std (0.08 rad ≈ 4.5°): prevents skyward gaze and lateral head whipping.
     cfg.rewards["head_pose_tracking"] = RewardTermCfg(
         func=microduck_mdp.head_pose_tracking,
-        weight=0.3,
-        params={"command_name": "head_pose", "std": 0.6},
+        weight=2.0,
+        params={
+            "command_name": "head_pose",
+            "std": SPRINT_HEAD_STD,
+            "default_offset": SPRINT_HEAD_OFFSET,
+        },
     )
     # body_pose: infra kept intact at weight 0 for 61D runtime compatibility.
     cfg.rewards["body_pose_tracking"] = RewardTermCfg(
@@ -695,9 +773,9 @@ def make_microduck_run_env_cfg(
             cfg.scene.terrain.terrain_generator.num_cols = 5
             cfg.scene.terrain.terrain_generator.num_rows = 5
 
-    # === 5-STAGE FROM-SCRATCH SPRINT CURRICULUM ===
+    # === 5-STAGE FROM-SCRATCH SPRINT CURRICULUM (UP TO 1.0 m/s) ===
     # 1. Forward velocity window curriculum: progressively shifts the commanded
-    #    speed band from a gentle trot discovery [0.15, 0.35] up to full sprint [0.75, 0.80].
+    #    speed band from [0.30, 0.50] up to full sprint [0.90, 1.00] m/s.
     cfg.curriculum["velocity_command_ranges"] = CurriculumTermCfg(
         func=microduck_mdp.velocity_command_ranges_curriculum,
         params={
@@ -706,28 +784,29 @@ def make_microduck_run_env_cfg(
             "update_ang_vel_z": False,
             "forward_only": True,
             "velocity_stages": [
-                {"step": 0,                         "lin_vel_range": (0.15, 0.35)},  # Stage 0: stride discovery
-                {"step": 1000 * NUM_STEPS_PER_ENV, "lin_vel_range": (0.30, 0.50)},  # Stage 1: fast walk / stride extension
-                {"step": 2200 * NUM_STEPS_PER_ENV, "lin_vel_range": (0.45, 0.65)},  # Stage 2: transition to running flight phase
-                {"step": 3500 * NUM_STEPS_PER_ENV, "lin_vel_range": (0.60, 0.80)},  # Stage 3: high-speed sprint
-                {"step": 4800 * NUM_STEPS_PER_ENV, "lin_vel_range": (0.75, 0.80)},  # Stage 4: top-speed consolidation
+                {"step": 0,                         "lin_vel_range": (0.30, 0.50)},  # Stage 0: fast stride discovery
+                {"step": 1000 * NUM_STEPS_PER_ENV, "lin_vel_range": (0.50, 0.70)},  # Stage 1: transition to running
+                {"step": 2200 * NUM_STEPS_PER_ENV, "lin_vel_range": (0.65, 0.85)},  # Stage 2: high-speed running
+                {"step": 3500 * NUM_STEPS_PER_ENV, "lin_vel_range": (0.80, 0.95)},  # Stage 3: sprint acceleration
+                {"step": 4800 * NUM_STEPS_PER_ENV, "lin_vel_range": (0.90, 1.00)},  # Stage 4: 0.9–1.0 m/s top-speed sprint
             ],
         },
     )
 
-    # 2. Stride air-time threshold curriculum: co-ramped with speed stages to
-    #    require stronger push-off and clean swing clearance at higher speeds.
-    cfg.curriculum["air_time_threshold"] = CurriculumTermCfg(
-        func=microduck_mdp.reward_param_curriculum,
+    # 2. Aerial flight-phase weight curriculum: ramps the reward for having BOTH
+    #    feet simultaneously airborne at speed from 0.5 in Stage 0 up to 2.5 in
+    #    Stage 4, while air_time.threshold_min stays fixed at 0.025 s so high
+    #    stride frequency f is never penalized.
+    cfg.curriculum["flight_phase_weight"] = CurriculumTermCfg(
+        func=microduck_mdp.reward_weight,
         params={
-            "reward_name": "air_time",
-            "param_name": "threshold_min",
-            "stages": [
-                {"step": 0,                         "value": 0.04},
-                {"step": 1000 * NUM_STEPS_PER_ENV, "value": 0.06},
-                {"step": 2200 * NUM_STEPS_PER_ENV, "value": 0.08},
-                {"step": 3500 * NUM_STEPS_PER_ENV, "value": 0.10},
-                {"step": 4800 * NUM_STEPS_PER_ENV, "value": 0.12},
+            "reward_name": "flight_phase",
+            "weight_stages": [
+                {"step": 0,                         "weight": 0.5},
+                {"step": 1000 * NUM_STEPS_PER_ENV, "weight": 1.0},
+                {"step": 2200 * NUM_STEPS_PER_ENV, "weight": 1.5},
+                {"step": 3500 * NUM_STEPS_PER_ENV, "weight": 2.0},
+                {"step": 4800 * NUM_STEPS_PER_ENV, "weight": 2.5},
             ],
         },
     )
@@ -781,6 +860,7 @@ def make_microduck_run_env_cfg(
     del cfg.curriculum["command_vel"]
 
     if play:
+        cfg.commands["twist"].debug_vis = False
         cfg.commands["twist"].rel_standing_envs = 0.0
         cfg.commands["twist"].ranges.lin_vel_x = (MAX_RUN_SPEED, MAX_RUN_SPEED)
         cfg.commands["twist"].ranges.lin_vel_y = (0.0, 0.0)
@@ -788,7 +868,7 @@ def make_microduck_run_env_cfg(
         cfg.commands["head_pose"].ranges = ((0.0, 0.0),) * 4
         cfg.commands["body_pose"].ranges = ((0.0, 0.0),) * 6
         cfg.curriculum.pop("velocity_command_ranges", None)
-        cfg.curriculum.pop("air_time_threshold", None)
+        cfg.curriculum.pop("flight_phase_weight", None)
 
     return cfg
 
@@ -829,5 +909,5 @@ MicroduckRunRlCfg = RslRlOnPolicyRunnerCfg(
     run_name="run",  # Appended to datetime in wandb: <datetime>_run
     save_interval=250,
     num_steps_per_env=24,
-    max_iterations=6_000,
+    max_iterations=7_000,
 )

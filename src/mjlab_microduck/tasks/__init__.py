@@ -241,7 +241,7 @@ register_mjlab_task(
     runner_cls=MicroduckOnPolicyRunner,
 )
 
-# Run task — straight-line forward sprint up to 0.8 m/s on flat terrain.
+# Run task — straight-line forward sprint up to 1.0 m/s on flat terrain.
 register_mjlab_task(
     task_id="Mjlab-Run-Flat-MicroDuck",
     env_cfg=make_microduck_run_env_cfg(),
