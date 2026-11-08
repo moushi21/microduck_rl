@@ -1,20 +1,20 @@
 """Microduck straight-line running environment (Mjlab-Run-Flat-MicroDuck).
 
-High-speed straight-line forward running up to 1.0 m/s (~4.0 body lengths/s,
-Froude number Fr ≈ 0.78) trained from scratch on flat terrain, registered both
-as ``Mjlab-Run-Flat-MicroDuck`` (``robot_walk.xml``) and its ±1° serial-play
-backlash twin ``Mjlab-Run-Flat-Backlash-MicroDuck`` (``robot_walk_backlash.xml``,
-preserving the shared 61D actor observation and 14D action contract):
+High-speed straight-line forward running up to the XL330 hardware limit of
+1.25 m/s (~5.0 body lengths/s, Froude number Fr ≈ 1.22) trained from scratch on
+flat terrain, registered both as ``Mjlab-Run-Flat-MicroDuck`` (``robot_walk.xml``)
+and its ±1° serial-play backlash twin ``Mjlab-Run-Flat-Backlash-MicroDuck``
+(``robot_walk_backlash.xml``, preserving the shared 61D actor observation and
+14D action contract):
 
   - **Stride & 3D hip coordination (腰・膝・足首の蹴り方と歩幅 + 振り上げ足内旋・蹴り足外旋)**:
     speed-staged ``pose`` tolerances (light weight ``0.25``) keep ``std_standing``
-    tight, then progressively open **both** sagittal joints (``hip_pitch`` 0.55 -> 0.75,
-    ``knee`` 0.60 -> 0.80, ``ankle`` 0.45 -> 0.55) **and** 3D hip rotation
-    (``hip_yaw`` 0.25 -> 0.35, ``hip_roll`` 0.12 -> 0.18) above
-    ``running_threshold = 0.45 m/s``. This allows the forward-swinging foot to
-    rotate slightly inward toward the CoM midline (reducing lateral waddle) and
-    the rear push-off foot to rotate slightly outward (sprinter/skater-style 3D
-    hip extension combining ``hip_pitch + hip_yaw + hip_roll``).
+    tight, then progressively open **both** sagittal joints (``hip_pitch`` 0.55 -> 0.85,
+    ``knee`` 0.60 -> 0.90, ``ankle`` 0.45 -> 0.65) **and** 3D hip rotation
+    (``hip_yaw`` 0.25 -> 0.38, ``hip_roll`` 0.12 -> 0.20) above
+    ``running_threshold = 0.45 m/s``. This unlocks 4-joint serial velocity
+    summation (``hip_pitch + hip_yaw + knee + ankle``) at push-off to exceed the
+    ~0.95 m/s single-servo back-EMF limit.
   - **Pronounced forward sprint lean (前傾姿勢)**: both ``upright``
     (``sprint_lean_upright_reward``) and ``forward_lean`` target a unified
     ``TARGET_FORWARD_LEAN_RAD = 0.30 rad`` (~17.2° nose-down trunk pitch) when
@@ -45,7 +45,7 @@ import math
 from copy import deepcopy
 
 NUM_STEPS_PER_ENV = 24
-MAX_RUN_SPEED = 1.00  # Target top sprint velocity (m/s)
+MAX_RUN_SPEED = 1.25  # Target top sprint velocity pushing XL330 + aerial bound limit (m/s)
 TARGET_FORWARD_LEAN_RAD = 0.30  # ~17.2° forward trunk pitch during sprint
 # Nominal head delta from HOME [neck_pitch, head_pitch, head_yaw, head_roll]:
 # At HOME, neck_pitch=+0.349 rad (+20° tilted backward) and head_pitch=+0.349 rad.
@@ -223,15 +223,15 @@ def make_microduck_run_env_cfg(
 
     std_running = {
         # Stage 1–4 sprint regime (speed >= 0.45 m/s):
-        # wide sagittal freedom for high-cadence stride extension, swing knee
-        # folding, and ankle push-off, PLUS 3D hip rotation (hip_yaw=0.35, hip_roll=0.18)
-        # so the forward swing foot turns slightly inward toward the midline and
-        # the rear push-off foot turns outward (Microduck Arena 2M Sprint style).
-        r".*hip_yaw.*": 0.35,
-        r".*hip_roll.*": 0.18,
-        r".*hip_pitch.*": 0.75,
-        r".*knee.*": 0.80,
-        r".*ankle.*": 0.55,
+        # wide sagittal freedom for 4-joint serial push-off (hip_pitch + knee +
+        # ankle) and high swing knee folding, PLUS 3D hip rotation (hip_yaw=0.38,
+        # hip_roll=0.20) so the forward swing foot turns inward toward the midline
+        # and the rear push-off foot turns outward (Microduck Arena 2M Sprint style).
+        r".*hip_yaw.*": 0.38,
+        r".*hip_roll.*": 0.20,
+        r".*hip_pitch.*": 0.85,
+        r".*knee.*": 0.90,
+        r".*ankle.*": 0.65,
     }
 
     site_names = ["left_foot", "right_foot"]
@@ -422,13 +422,14 @@ def make_microduck_run_env_cfg(
 
     cfg.rewards["forward_speed"] = RewardTermCfg(
         func=microduck_mdp.forward_speed_reward,
-        weight=2.0,
-        params={"vel_ref": 0.80},
+        weight=2.5,
+        params={"vel_ref": 1.10},
     )
 
-    # Action smoothness: starts light (-0.02) so explosive push-off discovery is
-    # untaxed in Stage 0, then ramps to -0.10 by iter 4800 via curriculum.
-    cfg.rewards["action_rate_l2"].weight = -0.02
+    # Action smoothness: starts very light (-0.01) so explosive push-off discovery
+    # is untaxed in Stage 0, then ramps gently to -0.05 by iter 4800 so 5 Hz
+    # full-amplitude sprint strokes at 1.25 m/s are not choked.
+    cfg.rewards["action_rate_l2"].weight = -0.01
 
     # Foot clearance & swing height: 3.5 cm target height (with softened -0.5
     # clearance weight) encourages high knee-folding during the forward recovery
@@ -672,7 +673,7 @@ def make_microduck_run_env_cfg(
 
     # === COMMANDS ===
     # Straight-line forward velocity command:
-    # - Stage 0 starts at lin_vel_x = (0.30, 0.50) and ramps to (0.90, 1.00) via curriculum.
+    # - Stage 0 starts at lin_vel_x = (0.35, 0.55) and ramps to (1.05, 1.25) via curriculum.
     # - rel_forward_envs = 0.5 zeroes vy/wz on half the envs (pure straight-line command)
     #   while the other half samples tiny non-zero vy/wz noise so obs[49:51] normalizer
     #   std never collapses to eps.
@@ -683,7 +684,7 @@ def make_microduck_run_env_cfg(
     command.rel_standing_envs = 0.02
     command.rel_heading_envs = 0.0
     command.rel_forward_envs = 0.5
-    command.ranges.lin_vel_x = (0.30, 0.50)
+    command.ranges.lin_vel_x = (0.35, 0.55)
     command.ranges.lin_vel_y = (-0.01, 0.01)
     command.ranges.ang_vel_z = (-0.02, 0.02)
     command.debug_vis = False
@@ -773,9 +774,9 @@ def make_microduck_run_env_cfg(
             cfg.scene.terrain.terrain_generator.num_cols = 5
             cfg.scene.terrain.terrain_generator.num_rows = 5
 
-    # === 5-STAGE FROM-SCRATCH SPRINT CURRICULUM (UP TO 1.0 m/s) ===
+    # === 5-STAGE FROM-SCRATCH SPRINT CURRICULUM (UP TO 1.25 m/s HARDWARE LIMIT) ===
     # 1. Forward velocity window curriculum: progressively shifts the commanded
-    #    speed band from [0.30, 0.50] up to full sprint [0.90, 1.00] m/s.
+    #    speed band from [0.35, 0.55] up to the hardware limit [1.05, 1.25] m/s.
     cfg.curriculum["velocity_command_ranges"] = CurriculumTermCfg(
         func=microduck_mdp.velocity_command_ranges_curriculum,
         params={
@@ -784,11 +785,11 @@ def make_microduck_run_env_cfg(
             "update_ang_vel_z": False,
             "forward_only": True,
             "velocity_stages": [
-                {"step": 0,                         "lin_vel_range": (0.30, 0.50)},  # Stage 0: fast stride discovery
-                {"step": 1000 * NUM_STEPS_PER_ENV, "lin_vel_range": (0.50, 0.70)},  # Stage 1: transition to running
-                {"step": 2200 * NUM_STEPS_PER_ENV, "lin_vel_range": (0.65, 0.85)},  # Stage 2: high-speed running
-                {"step": 3500 * NUM_STEPS_PER_ENV, "lin_vel_range": (0.80, 0.95)},  # Stage 3: sprint acceleration
-                {"step": 4800 * NUM_STEPS_PER_ENV, "lin_vel_range": (0.90, 1.00)},  # Stage 4: 0.9–1.0 m/s top-speed sprint
+                {"step": 0,                         "lin_vel_range": (0.35, 0.55)},  # Stage 0: fast stride discovery
+                {"step": 1000 * NUM_STEPS_PER_ENV, "lin_vel_range": (0.55, 0.80)},  # Stage 1: walk-to-run transition
+                {"step": 2200 * NUM_STEPS_PER_ENV, "lin_vel_range": (0.75, 1.00)},  # Stage 2: breaking 1.0 m/s via flight phase
+                {"step": 3500 * NUM_STEPS_PER_ENV, "lin_vel_range": (0.95, 1.15)},  # Stage 3: high-speed aerial sprint
+                {"step": 4800 * NUM_STEPS_PER_ENV, "lin_vel_range": (1.05, 1.25)},  # Stage 4: 1.05–1.25 m/s hardware limit sprint
             ],
         },
     )
@@ -811,18 +812,18 @@ def make_microduck_run_env_cfg(
         },
     )
 
-    # 3. Action-rate smoothness curriculum: kept very light (-0.02) during Stage 0
-    #    so dynamic push-off is not taxed before the gait exists, then tightened to -0.10.
+    # 3. Action-rate smoothness curriculum: kept light (-0.01 -> -0.05) so 5 Hz
+    #    full-amplitude sprint strokes at 1.25 m/s are not choked.
     cfg.curriculum["action_rate_weight"] = CurriculumTermCfg(
         func=microduck_mdp.reward_weight,
         params={
             "reward_name": "action_rate_l2",
             "weight_stages": [
-                {"step": 0,                         "weight": -0.02},
-                {"step": 1000 * NUM_STEPS_PER_ENV, "weight": -0.04},
-                {"step": 2200 * NUM_STEPS_PER_ENV, "weight": -0.06},
-                {"step": 3500 * NUM_STEPS_PER_ENV, "weight": -0.08},
-                {"step": 4800 * NUM_STEPS_PER_ENV, "weight": -0.10},
+                {"step": 0,                         "weight": -0.01},
+                {"step": 1000 * NUM_STEPS_PER_ENV, "weight": -0.02},
+                {"step": 2200 * NUM_STEPS_PER_ENV, "weight": -0.03},
+                {"step": 3500 * NUM_STEPS_PER_ENV, "weight": -0.04},
+                {"step": 4800 * NUM_STEPS_PER_ENV, "weight": -0.05},
             ],
         },
     )

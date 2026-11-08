@@ -166,15 +166,15 @@ def test_run_curricula_five_stages_co_scheduled():
     assert [s["step"] for s in flt_stages] == expected_steps
     assert [s["step"] for s in act_stages] == expected_steps
 
-    # Initial stage values match cfg initial values, final stage reaches (0.90, 1.00)
-    assert vel_stages[0]["lin_vel_range"] == cfg.commands["twist"].ranges.lin_vel_x == (0.30, 0.50)
-    assert vel_stages[-1]["lin_vel_range"] == (0.90, 1.00)
-    assert MAX_RUN_SPEED == 1.00
+    # Initial stage values match cfg initial values, final stage reaches (1.05, 1.25)
+    assert vel_stages[0]["lin_vel_range"] == cfg.commands["twist"].ranges.lin_vel_x == (0.35, 0.55)
+    assert vel_stages[-1]["lin_vel_range"] == (1.05, 1.25)
+    assert MAX_RUN_SPEED == 1.25
     assert cfg.rewards["air_time"].params["threshold_min"] == 0.025  # Fixed 25 ms so high cadence is never penalized
     assert flt_stages[0]["weight"] == cfg.rewards["flight_phase"].weight == 0.5
     assert flt_stages[-1]["weight"] == 2.5
-    assert act_stages[0]["weight"] == cfg.rewards["action_rate_l2"].weight == -0.02
-    assert act_stages[-1]["weight"] == -0.10
+    assert act_stages[0]["weight"] == cfg.rewards["action_rate_l2"].weight == -0.01
+    assert act_stages[-1]["weight"] == -0.05
 
     assert "air_time_threshold" not in cfg.curriculum
     assert "standing_envs" not in cfg.curriculum
@@ -183,7 +183,7 @@ def test_run_curricula_five_stages_co_scheduled():
 
 
 def test_run_commands_straight_line_hide_arrows_and_play_mode():
-    """Twist/head/body commands hide blue viewer arrow, keep normalizer alive, and lock to 1.0 m/s in play."""
+    """Twist/head/body commands hide blue viewer arrow, keep normalizer alive, and lock to 1.25 m/s in play."""
     cfg = make_microduck_run_env_cfg()
     twist = cfg.commands["twist"]
     assert twist.debug_vis is False
@@ -192,7 +192,7 @@ def test_run_commands_straight_line_hide_arrows_and_play_mode():
     assert twist.rel_standing_envs == 0.02
     assert twist.rel_forward_envs == 0.5
     assert twist.rel_turn_in_place_envs == 0.0
-    assert twist.ranges.lin_vel_x == (0.30, 0.50)
+    assert twist.ranges.lin_vel_x == (0.35, 0.55)
     assert twist.ranges.lin_vel_y[0] < 0.0 < twist.ranges.lin_vel_y[1]
     assert twist.ranges.ang_vel_z[0] < 0.0 < twist.ranges.ang_vel_z[1]
     assert cfg.commands["head_pose"].zero_command_prob == 0.5
@@ -201,7 +201,7 @@ def test_run_commands_straight_line_hide_arrows_and_play_mode():
     play_cfg = make_microduck_run_env_cfg(play=True)
     assert play_cfg.commands["twist"].debug_vis is False
     assert play_cfg.commands["twist"].rel_standing_envs == 0.0
-    assert play_cfg.commands["twist"].ranges.lin_vel_x == (1.00, 1.00)
+    assert play_cfg.commands["twist"].ranges.lin_vel_x == (1.25, 1.25)
     assert play_cfg.commands["twist"].ranges.lin_vel_y == (0.0, 0.0)
     assert play_cfg.commands["twist"].ranges.ang_vel_z == (0.0, 0.0)
     assert "velocity_command_ranges" not in play_cfg.curriculum
