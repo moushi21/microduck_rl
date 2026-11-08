@@ -3720,24 +3720,30 @@ def velocity_command_ranges_curriculum(
 
     # Update velocity ranges based on current step
     current_lin_vel = velocity_stages[0]["lin_vel_range"]
-    current_ang_vel = velocity_stages[0]["ang_vel_range"]
+    current_ang_vel = velocity_stages[0].get("ang_vel_range", 0.0)
 
     for stage in velocity_stages:
-        if env.common_step_counter > stage["step"]:
+        if env.common_step_counter >= stage["step"]:
             current_lin_vel = stage["lin_vel_range"]
-            current_ang_vel = stage["ang_vel_range"]
+            if "ang_vel_range" in stage:
+                current_ang_vel = stage["ang_vel_range"]
 
     # Update command ranges
-    if forward_only:
-        cfg.ranges.lin_vel_x = (0.0, current_lin_vel)
+    if isinstance(current_lin_vel, (tuple, list)):
+        cfg.ranges.lin_vel_x = (float(current_lin_vel[0]), float(current_lin_vel[1]))
+        max_lin_vel = float(current_lin_vel[1])
+    elif forward_only:
+        cfg.ranges.lin_vel_x = (0.0, float(current_lin_vel))
+        max_lin_vel = float(current_lin_vel)
     else:
-        cfg.ranges.lin_vel_x = (-current_lin_vel, current_lin_vel)
+        cfg.ranges.lin_vel_x = (-float(current_lin_vel), float(current_lin_vel))
+        max_lin_vel = float(current_lin_vel)
     if update_lin_vel_y:
-        cfg.ranges.lin_vel_y = (-current_lin_vel, current_lin_vel)
+        cfg.ranges.lin_vel_y = (-max_lin_vel, max_lin_vel)
     if update_ang_vel_z:
-        cfg.ranges.ang_vel_z = (-current_ang_vel, current_ang_vel)
+        cfg.ranges.ang_vel_z = (-float(current_ang_vel), float(current_ang_vel))
 
-    return torch.tensor([current_lin_vel])
+    return torch.tensor([max_lin_vel])
 
 
 def projected_gravity(

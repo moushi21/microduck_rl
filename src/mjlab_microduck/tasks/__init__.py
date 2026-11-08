@@ -241,7 +241,7 @@ register_mjlab_task(
     runner_cls=MicroduckOnPolicyRunner,
 )
 
-# Run task — run forward at 0.4 m/s on flat terrain, with a 0.5 m/s max speed limit.
+# Run task — straight-line forward sprint up to 0.8 m/s on flat terrain.
 register_mjlab_task(
     task_id="Mjlab-Run-Flat-MicroDuck",
     env_cfg=make_microduck_run_env_cfg(),
@@ -295,6 +295,7 @@ _BACKLASH_TASKS = (
     ("Mjlab-Velocity-Swizzle-Backlash-MicroDuck", make_microduck_velocity_swizzle_env_cfg, {}, MicroduckSwizzleRlCfg, _BL_ROLLERS),
     ("Mjlab-RollerCrouch-Flat-Backlash-MicroDuck", make_microduck_roller_crouch_env_cfg, {}, MicroduckRollerCrouchRlCfg, _BL_ROLLERS),
     ("Mjlab-RollerSlope-Flat-Backlash-MicroDuck", make_microduck_roller_slope_env_cfg, {}, MicroduckRollerSlopeRlCfg, _BL_ROLLERS),
+    ("Mjlab-Run-Flat-Backlash-MicroDuck", make_microduck_run_env_cfg, {}, MicroduckRunRlCfg, _BL_WALK),
     ("Mjlab-Jump-Flat-Backlash-MicroDuck", make_microduck_jump_env_cfg, {}, MicroduckJumpRlCfg, _BL_WALK),
 )
 for _task_id, _make_cfg, _kw, _rl_cfg, _robot_cfg in _BACKLASH_TASKS:
