@@ -5689,7 +5689,8 @@ def flight_phase_reward(
     Walking always keeps at least one foot on the ground (duty factor >= 0.5);
     running is physically defined by an aerial bound where both feet are off the
     ground (`min(current_air_time) > 0`). Multiplied by ``clamp(vx_yaw / vel_ref, 0, 1)``
-    so hopping in place earns strictly 0 — only forward-travelling aerial bounds pay.
+    so hopping in place earns strictly 0, and amplified by upward launch velocity
+    ``1 + clamp(vz_w, 0, 0.5)`` so real ballistic bounds pay more than skimming 1 mm off the floor.
     """
     from mjlab.sensor import ContactSensor
 
@@ -5702,9 +5703,61 @@ def flight_phase_reward(
     vx_yaw = _horizontal_lin_vel_yaw(asset)[:, 0]
     speed_gate = torch.clamp(vx_yaw / max(vel_ref, 1e-3), min=0.0, max=1.0)
 
+    vz_w = torch.nan_to_num(asset.data.root_link_lin_vel_w[:, 2], nan=0.0)
+    leap_boost = 1.0 + torch.clamp(vz_w, min=0.0, max=0.5)
+
     cmd_x = env.command_manager.get_command(command_name)[:, 0]
     cmd_gate = (cmd_x > command_threshold).float()
-    return both_airborne * speed_gate * cmd_gate
+    return both_airborne * leap_boost * speed_gate * cmd_gate
+
+
+def stride_length_reward(
+    env: ManagerBasedRlEnv,
+    command_name: str = "twist",
+    ref_span: float = 0.12,
+    vel_ref: float = 0.50,
+    command_threshold: float = 0.05,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot", site_names=("left_foot", "right_foot")),
+) -> torch.Tensor:
+    """Reward dynamic fore-aft foot separation (歩幅) along the heading direction at speed.
+
+    Measures the longitudinal distance between left_foot and right_foot in the
+    robot's horizontal yaw frame:
+      span_x = |(p_left_xy - p_right_xy) · u_yaw|
+    Normalized by ``ref_span`` (12 cm) and gated by ``clamp(vx_yaw / vel_ref, 0, 1)``
+    so a static split on the spot earns 0; only wide, dynamic scissor strides that
+    actually propel the body forward pay.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    site_pos_w = torch.nan_to_num(asset.data.site_pos_w[:, asset_cfg.site_ids, :2], nan=0.0)
+    diff_xy = site_pos_w[:, 0, :] - site_pos_w[:, 1, :]  # (B, 2)
+
+    q = torch.nan_to_num(asset.data.root_link_quat_w, nan=0.0)
+    w, x, y, z = q[:, 0], q[:, 1], q[:, 2], q[:, 3]
+    yaw = torch.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+    u_yaw = torch.stack([torch.cos(yaw), torch.sin(yaw)], dim=1)
+
+    span_x = torch.abs(torch.sum(diff_xy * u_yaw, dim=1))
+    span_norm = torch.clamp(span_x / max(ref_span, 1e-3), min=0.0, max=1.2)
+
+    vx_yaw = _horizontal_lin_vel_yaw(asset)[:, 0]
+    speed_gate = torch.clamp(vx_yaw / max(vel_ref, 1e-3), min=0.0, max=1.0)
+
+    cmd_x = env.command_manager.get_command(command_name)[:, 0]
+    cmd_gate = (cmd_x > command_threshold).float()
+    return span_norm * speed_gate * cmd_gate
+
+
+def head_lateral_vel_l2(
+    env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG
+) -> torch.Tensor:
+    """Penalize ONLY lateral head velocities (head_yaw=7, head_roll=8) while leaving
+    sagittal pitch joints (neck_pitch=5, head_pitch=6) completely free to pump rhythmically
+    as a dynamic pitch counterweight during explosive sprinting."""
+    asset: Entity = env.scene[asset_cfg.name]
+    joint_vel = _servo_joint_vel(env, asset)
+    lateral_head_vel = joint_vel[:, [7, 8]]
+    return torch.sum(torch.square(lateral_head_vel), dim=1)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

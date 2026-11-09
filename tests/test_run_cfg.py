@@ -91,24 +91,35 @@ def test_run_biomechanics_and_reward_signs():
         assert std_s[leg_key] < std_w[leg_key] < std_r[leg_key], leg_key
     assert r["pose"].params["walking_threshold"] == 0.05
     assert r["pose"].params["running_threshold"] == 0.45
-    assert r["pose"].weight == 0.25
+    assert r["pose"].weight == 0.10
 
-    # 2. Unified forward lean: both upright and forward_lean target TARGET_FORWARD_LEAN_RAD (0.30 rad ≈ 17.2 deg)
+    # 2. Horizontal trunk (0.08 rad ≈ 4.6 deg) keeps hip height high while neck counterbalances battery
     assert r["upright"].func is microduck_mdp.sprint_lean_upright_reward
-    assert r["upright"].params["target_pitch"] == TARGET_FORWARD_LEAN_RAD == 0.30
+    assert r["upright"].params["target_pitch"] == TARGET_FORWARD_LEAN_RAD == 0.08
     assert r["forward_lean"].func is microduck_mdp.forward_lean_reward
     assert r["forward_lean"].params["target_pitch"] == TARGET_FORWARD_LEAN_RAD
 
-    # 3. Anti-head-whip & chin-down gaze: strong head tracking with SPRINT_HEAD_OFFSET + neck_vel penalty
-    assert r["head_pose_tracking"].weight >= 1.5
-    assert r["head_pose_tracking"].params["default_offset"] == SPRINT_HEAD_OFFSET
-    assert r["head_pose_tracking"].params["std"] == SPRINT_HEAD_STD
-    assert r["neck_vel"].func is microduck_mdp.neck_joint_vel_l2
+    # 3. Horizontal neck extension + sagittal head pumping freedom + lateral-only anti-whip
+    assert r["head_pose_tracking"].weight == 1.5
+    assert r["head_pose_tracking"].params["default_offset"] == SPRINT_HEAD_OFFSET == (
+        -1.65,
+        -1.40,
+        0.0,
+        0.0,
+    )
+    assert r["head_pose_tracking"].params["std"] == SPRINT_HEAD_STD == (
+        0.35,
+        0.35,
+        0.08,
+        0.08,
+    )
+    assert r["neck_vel"].func is microduck_mdp.head_lateral_vel_l2
     assert "head_pose_bias" not in r
 
-    # 4. Pitch/bounce-free horizontal velocity tracking, flight phase, & high knee-lift clearance
+    # 4. Pitch/bounce-free horizontal velocity tracking, flight phase, stride length, & high knee-lift clearance
     assert r["track_linear_velocity"].func is microduck_mdp.track_horizontal_linear_velocity
     assert r["flight_phase"].func is microduck_mdp.flight_phase_reward
+    assert r["stride_length"].func is microduck_mdp.stride_length_reward
     assert r["foot_clearance"].params["target_height"] == 0.035
     assert r["foot_swing_height"].params["target_height"] == 0.035
     assert r["heading_hold"].func is microduck_mdp.heading_hold_reward
@@ -121,6 +132,7 @@ def test_run_biomechanics_and_reward_signs():
         "track_angular_velocity",
         "forward_speed",
         "flight_phase",
+        "stride_length",
         "heading_hold",
         "forward_lean",
         "upright",
@@ -148,7 +160,7 @@ def test_run_biomechanics_and_reward_signs():
 
 
 def test_run_curricula_five_stages_co_scheduled():
-    """Verify 5-stage from-scratch sprint curriculum reaches 0.9–1.0 m/s with flight_phase ramp."""
+    """Verify 5-stage from-scratch sprint curriculum reaches 1.05–1.25 m/s with flight_phase ramp."""
     cfg = make_microduck_run_env_cfg()
     expected_steps = [
         0,
@@ -171,10 +183,11 @@ def test_run_curricula_five_stages_co_scheduled():
     assert vel_stages[-1]["lin_vel_range"] == (1.05, 1.25)
     assert MAX_RUN_SPEED == 1.25
     assert cfg.rewards["air_time"].params["threshold_min"] == 0.025  # Fixed 25 ms so high cadence is never penalized
+    assert cfg.rewards["air_time"].params["threshold_max"] == 0.140
     assert flt_stages[0]["weight"] == cfg.rewards["flight_phase"].weight == 0.5
     assert flt_stages[-1]["weight"] == 2.5
-    assert act_stages[0]["weight"] == cfg.rewards["action_rate_l2"].weight == -0.01
-    assert act_stages[-1]["weight"] == -0.05
+    assert act_stages[0]["weight"] == cfg.rewards["action_rate_l2"].weight == -0.005
+    assert act_stages[-1]["weight"] == -0.025
 
     assert "air_time_threshold" not in cfg.curriculum
     assert "standing_envs" not in cfg.curriculum
@@ -209,7 +222,7 @@ def test_run_commands_straight_line_hide_arrows_and_play_mode():
 
 
 def test_run_sprint_head_offset_points_gaze_downward_in_mujoco():
-    """Physics check: SPRINT_HEAD_OFFSET=(-0.75, -0.50, 0, 0) pitches neck deeply forward (>3 cm CoM shift) and tilts face downward."""
+    """Physics check: SPRINT_HEAD_OFFSET=(-1.45, -1.20, 0, 0) pitches neck nearly horizontal (>4.2 cm CoM shift) inside soft limit and tilts face downward."""
     model = get_walk_spec().compile()
     data_home = mujoco.MjData(model)
     data_sprint = mujoco.MjData(model)
@@ -228,7 +241,13 @@ def test_run_sprint_head_offset_points_gaze_downward_in_mujoco():
     neck_names = ("neck_pitch", "head_pitch", "head_yaw", "head_roll")
     for name, delta in zip(neck_names, SPRINT_HEAD_OFFSET):
         j_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, name)
-        data_sprint.qpos[model.jnt_qposadr[j_id]] += delta
+        q_target = data_sprint.qpos[model.jnt_qposadr[j_id]] + delta
+        data_sprint.qpos[model.jnt_qposadr[j_id]] = q_target
+        # Must stay strictly inside 90% soft joint limit so dof_pos_limits is 0.0
+        lo, hi = model.jnt_range[j_id]
+        mid = 0.5 * (lo + hi)
+        half = 0.5 * (hi - lo) * 0.9
+        assert (mid - half) < q_target < (mid + half), f"{name}={q_target} exceeds soft limit"
 
     mujoco.mj_forward(model, data_home)
     mujoco.mj_forward(model, data_sprint)
@@ -236,8 +255,8 @@ def test_run_sprint_head_offset_points_gaze_downward_in_mujoco():
     head_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "jaw_soft")
     cam_site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "head_camera")
 
-    # 1. Deep forward neck extension shifts 280 g head CoM >3.0 cm forward (+x in trunk frame)
-    assert data_sprint.xipos[head_body_id, 0] > data_home.xipos[head_body_id, 0] + 0.030
+    # 1. Extreme horizontal neck extension shifts 280 g head CoM >4.5 cm forward (+x in trunk frame)
+    assert data_sprint.xipos[head_body_id, 0] > data_home.xipos[head_body_id, 0] + 0.045
 
     # 2. Forward gaze axis (+x of head_camera site, which is horizontal 0.0 at HOME)
     # pitches downward (-z in world: -sin(0.25) ≈ -0.247) and up-axis (+z) tilts to cos(0.25) ≈ 0.969.
@@ -445,8 +464,8 @@ def test_mdp_sprint_lean_upright_and_forward_lean():
 
 
 def test_mdp_track_horizontal_velocity_and_flight_phase():
-    """Verify track_horizontal_linear_velocity ignores pitch/vz bounce and flight_phase requires both feet airborne at speed."""
-    pitch = 0.30
+    """Verify track_horizontal_linear_velocity ignores pitch/vz bounce and flight_phase requires both feet airborne at speed with leap_boost."""
+    pitch = 0.22
     quat_pitched = [math.cos(pitch / 2), 0.0, math.sin(pitch / 2), 0.0]
     quat_w = torch.tensor(
         [quat_pitched, [1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]],
@@ -470,7 +489,7 @@ def test_mdp_track_horizontal_velocity_and_flight_phase():
     )
     air_time = torch.tensor(
         [
-            [0.04, 0.03],  # both feet airborne -> flight phase!
+            [0.04, 0.03],  # both feet airborne + upward vz=0.35 -> leap_boost = 1.35!
             [0.05, 0.05],  # both airborne, but vx=0 (hopping in place)
             [0.08, 0.00],  # single-support walk (right foot grounded)
         ],
@@ -495,6 +514,55 @@ def test_mdp_track_horizontal_velocity_and_flight_phase():
     flt = microduck_mdp.flight_phase_reward(
         env, sensor_name="feet_ground_contact", command_name="twist", vel_ref=0.50
     )
-    assert torch.isclose(flt[0], torch.tensor(1.0), atol=1e-5)
+    assert torch.isclose(flt[0], torch.tensor(1.35), atol=1e-5)
     assert torch.isclose(flt[1], torch.tensor(0.0), atol=1e-5)
     assert torch.isclose(flt[2], torch.tensor(0.0), atol=1e-5)
+
+
+def test_mdp_stride_length_and_head_lateral_vel():
+    """Verify stride_length_reward measures fore-aft foot span and head_lateral_vel_l2 ignores sagittal pitch pumping."""
+    quat_w = torch.tensor([[1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]], dtype=torch.float32)
+    v_w = torch.tensor([[1.0, 0.0, 0.0], [0.0, 0.0, 0.0]], dtype=torch.float32)
+    cmds = torch.tensor([[1.0, 0.0, 0.0], [1.0, 0.0, 0.0]], dtype=torch.float32)
+    # env 0: 12 cm fore-aft foot separation at 1.0 m/s -> 1.0
+    # env 1: 12 cm separation but vx = 0.0 -> 0.0 (no stationary split farming)
+    site_pos_w = torch.tensor(
+        [
+            [[0.06, 0.04, 0.02], [-0.06, -0.04, 0.01]],
+            [[0.06, 0.04, 0.02], [-0.06, -0.04, 0.01]],
+        ],
+        dtype=torch.float32,
+    )
+    # 14 servos: indices 5,6 = neck_pitch, head_pitch; indices 7,8 = head_yaw, head_roll
+    j_vel = torch.zeros((2, 14), dtype=torch.float32)
+    j_vel[0, 5] = 4.0  # rapid sagittal neck_pitch pumping -> 0 penalty!
+    j_vel[0, 6] = -4.0  # rapid sagittal head_pitch pumping -> 0 penalty!
+    j_vel[1, 7] = 2.0  # lateral head_yaw shake -> penalized (2^2 = 4.0)
+
+    asset = SimpleNamespace(
+        joint_names=[f"servo_{i}" for i in range(14)],
+        data=SimpleNamespace(
+            root_link_lin_vel_w=v_w,
+            root_link_quat_w=quat_w,
+            site_pos_w=site_pos_w,
+            joint_vel=j_vel,
+        ),
+        find_sites=lambda names, preserve_order=True: ([0, 1], names),
+        find_joints=lambda pat: (list(range(14)), [f"servo_{i}" for i in range(14)]),
+    )
+    env = SimpleNamespace(
+        num_envs=2,
+        device="cpu",
+        scene={"robot": asset},
+        command_manager=SimpleNamespace(get_command=lambda name: cmds),
+    )
+
+    stride = microduck_mdp.stride_length_reward(
+        env, command_name="twist", ref_span=0.12, vel_ref=0.50
+    )
+    assert torch.isclose(stride[0], torch.tensor(1.0), atol=1e-5)
+    assert torch.isclose(stride[1], torch.tensor(0.0), atol=1e-5)
+
+    lat_vel = microduck_mdp.head_lateral_vel_l2(env)
+    assert torch.isclose(lat_vel[0], torch.tensor(0.0), atol=1e-5)
+    assert torch.isclose(lat_vel[1], torch.tensor(4.0), atol=1e-5)
