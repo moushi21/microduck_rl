@@ -5690,7 +5690,8 @@ def flight_phase_reward(
     running is physically defined by an aerial bound where both feet are off the
     ground (`min(current_air_time) > 0`). Multiplied by ``clamp(vx_yaw / vel_ref, 0, 1)``
     so hopping in place earns strictly 0, and amplified by upward launch velocity
-    ``1 + clamp(vz_w, 0, 0.5)`` so real ballistic bounds pay more than skimming 1 mm off the floor.
+    ``1 + clamp(vz_w, 0, 0.25)`` so forward ballistic bounds pay more than skimming 1 mm off the floor
+    without encouraging excessive vertical-only high jumps.
     """
     from mjlab.sensor import ContactSensor
 
@@ -5704,7 +5705,7 @@ def flight_phase_reward(
     speed_gate = torch.clamp(vx_yaw / max(vel_ref, 1e-3), min=0.0, max=1.0)
 
     vz_w = torch.nan_to_num(asset.data.root_link_lin_vel_w[:, 2], nan=0.0)
-    leap_boost = 1.0 + torch.clamp(vz_w, min=0.0, max=0.5)
+    leap_boost = 1.0 + torch.clamp(vz_w, min=0.0, max=0.25)
 
     cmd_x = env.command_manager.get_command(command_name)[:, 0]
     cmd_gate = (cmd_x > command_threshold).float()

@@ -21,19 +21,20 @@ and its ±1° serial-play backlash twin ``Mjlab-Run-Flat-Backlash-MicroDuck``
     trunk nearly horizontal to the ground (``TARGET_FORWARD_LEAN_RAD = 0.08 rad`` ≈
     4.6°) so the hip joints stay high and retain 100% of their forward swing range.
     To counterbalance the heavy rear ``np_f970`` battery without tilting the trunk
-    down into the thighs, ``head_pose_tracking`` (``weight = 1.5``) shifts the
-    nominal neck/head target by ``SPRINT_HEAD_OFFSET = (-1.65, -1.40, 0.0, 0.0)``
-    so the 5 cm neck link pitches down to ``neck_pitch ≈ -1.30 rad = -74.5°`` in
-    trunk frame (~79° from vertical / ~11° above horizontal in world frame —
+    down into the thighs, ``head_pose_tracking`` (``weight = 2.0``) shifts the
+    nominal neck/head target by ``SPRINT_HEAD_OFFSET = (-1.55, -1.45, 0.0, 0.0)``
+    so the 5 cm neck link pitches down to ``neck_pitch ≈ -1.20 rad = -68.8°`` in
+    trunk frame (~73.4° from vertical / ~16.6° above horizontal in world frame —
     oscillating between horizontal and slightly raised above horizontal while
-    shifting the 280 g head CoM ~4.8 cm forward) and ``head_pitch`` compensates
-    so the face points ~14.3° downward relative to the trunk.
-  - **Dynamic sagittal head pumping & lateral anti-whip (前後の激しい頭ポンプ運動と左右首振り抑制)**:
-    Relaxed sagittal pitch stds ``SPRINT_HEAD_STD = (0.35, 0.35, 0.08, 0.08)`` and
+    shifting the 280 g head CoM ~4.7 cm forward) and ``head_pitch`` compensates
+    so the face points ~5.7° downward relative to the trunk.
+  - **Dynamic sagittal neck pumping & anti-head-tuck (前後の激しい首ポンプ運動・顔面巻き込み防止・左右首振り抑制)**:
+    Asymmetric pitch stds ``SPRINT_HEAD_STD = (0.30, 0.15, 0.08, 0.08)`` and
     ``head_lateral_vel_l2`` (``weight = -0.08``, penalizing **only** ``head_yaw`` and
     ``head_roll`` velocity while leaving ``neck_pitch`` and ``head_pitch`` 100% free)
-    let the 280 g head pump rapidly in the sagittal plane in phase with leg kicks
-    as an angular-momentum counterweight while keeping lateral head shake locked.
+    let ``neck_pitch`` (`std = 0.30`) pump rapidly in the sagittal plane in phase
+    with leg kicks while ``head_pitch`` (`std = 0.15`) prevents the face from
+    folding 90° downward or tucking underneath the neck on jump landings.
   - **Pitch- & bounce-free horizontal velocity tracking + ballistic aerial flight phase**:
     Replaces stock ``mdp.track_linear_velocity`` (which reads 3D tilted body-frame
     velocity and penalizes ``v_b,z²``, punishing both forward trunk pitch
@@ -53,17 +54,18 @@ MAX_RUN_SPEED = 1.25  # Target top sprint velocity pushing XL330 + aerial bound 
 TARGET_FORWARD_LEAN_RAD = 0.08  # ~4.6° trunk pitch: keeps trunk nearly horizontal to the ground
 # Nominal head delta from HOME [neck_pitch, head_pitch, head_yaw, head_roll]:
 # At HOME, neck_pitch=+0.349 rad (+20° tilted backward) and head_pitch=+0.349 rad.
-# Delta (-1.65, -1.40, 0.0, 0.0) pitches the 5 cm neck link to -1.30 rad (-74.5°
-# in trunk frame; with ~4.6° trunk pitch the neck is ~79° from vertical = ~11°
+# Delta (-1.55, -1.45, 0.0, 0.0) pitches the 5 cm neck link to -1.20 rad (-68.8°
+# in trunk frame; with ~4.6° trunk pitch the neck is ~73.4° from vertical = ~16.6°
 # above horizontal, oscillating between horizontal and slightly raised above
-# horizontal as in Microduck Arena 2M Sprint, shifting the 280 g head CoM ~4.8 cm
+# horizontal as in Microduck Arena 2M Sprint, shifting the 280 g head CoM ~4.7 cm
 # forward to counterbalance the rear NP-F970 battery while staying inside the
-# -1.44 rad soft joint limit). Net head pitch in trunk frame is (-1.40) - (-1.65)
-# = +0.25 rad (+14.3° nose-down relative to trunk).
-SPRINT_HEAD_OFFSET = (-1.65, -1.40, 0.0, 0.0)
-# Wide sagittal std (0.35 rad on neck_pitch/head_pitch) allows rapid sagittal
-# head pumping in sync with leg kicks; tight yaw/roll std (0.08 rad) locks lateral shake.
-SPRINT_HEAD_STD = (0.35, 0.35, 0.08, 0.08)
+# -1.44 rad soft joint limit). Net head pitch in trunk frame is (-1.45) - (-1.55)
+# = +0.10 rad (+5.7° slightly nose-down relative to trunk).
+SPRINT_HEAD_OFFSET = (-1.55, -1.45, 0.0, 0.0)
+# Wide neck_pitch std (0.30 rad) allows rapid sagittal neck pumping in sync with
+# leg kicks; tighter head_pitch std (0.15 rad) stops the face from folding 90°
+# downward or tucking under the neck; tight yaw/roll std (0.08 rad) locks lateral shake.
+SPRINT_HEAD_STD = (0.30, 0.15, 0.08, 0.08)
 
 # Straight-line running task — zero turn-in-place fraction.
 TURN_IN_PLACE_FRACTION = 0.0
@@ -760,12 +762,12 @@ def make_microduck_run_env_cfg(
         )
 
     # === Pose tracking rewards ===
-    # Horizontal-neck head posture (weight=1.5) around SPRINT_HEAD_OFFSET=(-1.45, -1.20, 0.0, 0.0)
-    # with relaxed sagittal std (0.35 rad on neck_pitch/head_pitch) so the head can pump
-    # rhythmically in sync with leg kicks, and tight yaw/roll std (0.08 rad ≈ 4.5°) to lock lateral shake.
+    # Horizontal-neck head posture (weight=2.0) around SPRINT_HEAD_OFFSET=(-1.55, -1.45, 0.0, 0.0)
+    # with wide neck_pitch std (0.30 rad) for rapid sagittal pumping, tighter head_pitch std
+    # (0.15 rad) to stop the face from folding 90° downward, and tight yaw/roll std (0.08 rad).
     cfg.rewards["head_pose_tracking"] = RewardTermCfg(
         func=microduck_mdp.head_pose_tracking,
-        weight=1.5,
+        weight=2.0,
         params={
             "command_name": "head_pose",
             "std": SPRINT_HEAD_STD,

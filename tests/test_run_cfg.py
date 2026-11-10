@@ -99,17 +99,17 @@ def test_run_biomechanics_and_reward_signs():
     assert r["forward_lean"].func is microduck_mdp.forward_lean_reward
     assert r["forward_lean"].params["target_pitch"] == TARGET_FORWARD_LEAN_RAD
 
-    # 3. Horizontal neck extension + sagittal head pumping freedom + lateral-only anti-whip
-    assert r["head_pose_tracking"].weight == 1.5
+    # 3. Horizontal neck extension + sagittal neck pumping + anti-head-tuck + lateral-only anti-whip
+    assert r["head_pose_tracking"].weight == 2.0
     assert r["head_pose_tracking"].params["default_offset"] == SPRINT_HEAD_OFFSET == (
-        -1.65,
-        -1.40,
+        -1.55,
+        -1.45,
         0.0,
         0.0,
     )
     assert r["head_pose_tracking"].params["std"] == SPRINT_HEAD_STD == (
-        0.35,
-        0.35,
+        0.30,
+        0.15,
         0.08,
         0.08,
     )
@@ -255,17 +255,17 @@ def test_run_sprint_head_offset_points_gaze_downward_in_mujoco():
     head_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "jaw_soft")
     cam_site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "head_camera")
 
-    # 1. Extreme horizontal neck extension shifts 280 g head CoM >4.5 cm forward (+x in trunk frame)
-    assert data_sprint.xipos[head_body_id, 0] > data_home.xipos[head_body_id, 0] + 0.045
+    # 1. Extreme horizontal neck extension shifts 280 g head CoM >4.4 cm forward (+x in trunk frame)
+    assert data_sprint.xipos[head_body_id, 0] > data_home.xipos[head_body_id, 0] + 0.044
 
     # 2. Forward gaze axis (+x of head_camera site, which is horizontal 0.0 at HOME)
-    # pitches downward (-z in world: -sin(0.25) ≈ -0.247) and up-axis (+z) tilts to cos(0.25) ≈ 0.969.
+    # pitches slightly downward (-z in world: -sin(0.10) ≈ -0.100) and never flips upside-down.
     cam_mat_home = data_home.site_xmat[cam_site_id].reshape(3, 3)
     cam_mat_sprint = data_sprint.site_xmat[cam_site_id].reshape(3, 3)
     forward_gaze_z_home = cam_mat_home[2, 0]
     forward_gaze_z_sprint = cam_mat_sprint[2, 0]
     assert math.isclose(forward_gaze_z_home, 0.0, abs_tol=1e-4)
-    assert forward_gaze_z_sprint < -0.20  # Tilted ~14.3 deg downward vs horizontal HOME gaze
+    assert -0.20 < forward_gaze_z_sprint < -0.08  # Tilted ~5.7 deg downward vs horizontal HOME gaze
 
 
 def test_run_rl_cfg_has_distinct_experiment_and_symmetry():
@@ -514,7 +514,7 @@ def test_mdp_track_horizontal_velocity_and_flight_phase():
     flt = microduck_mdp.flight_phase_reward(
         env, sensor_name="feet_ground_contact", command_name="twist", vel_ref=0.50
     )
-    assert torch.isclose(flt[0], torch.tensor(1.35), atol=1e-5)
+    assert torch.isclose(flt[0], torch.tensor(1.25), atol=1e-5)
     assert torch.isclose(flt[1], torch.tensor(0.0), atol=1e-5)
     assert torch.isclose(flt[2], torch.tensor(0.0), atol=1e-5)
 
